@@ -1,0 +1,13 @@
+# Virtual Environment
+venv/
+
+# Model Weights
+weights/
+
+# Python Cache
+__pycache__/
+*.pyc
+
+# Local Test Files
+input_video.mp4
+output_video.mp4
