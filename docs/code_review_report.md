@@ -118,6 +118,8 @@ Rapor kapsamı dışında, ayrı bir istekle **top hızını topun yanına km/h 
 **Tamamlanan (sonraki oturumda — §7):**
 - ✅ §2.3 kısmen — court detection sahne bazlı önbellekleme
 - ✅ Person detector için daha hızlı alternatif — Faster R-CNN → YOLO11n
+- ✅ §7.1 — YOLO güven eşiği regresyonu (oyuncu kutuları çizilmiyordu)
+- ✅ README güncellemesi (tam komut örneği, ağırlık dosyası yerleşimi, Python sürümü, dinamik çözünürlük notu, top hızı/web UI bölümleri)
 
 **Kısa vade (1-2 gün) — hâlâ açık:**
 1. Streaming pipeline — belleğe tüm videoyu almadan sahne bazlı işle-yaz (§2.1)
@@ -129,7 +131,6 @@ Rapor kapsamı dışında, ayrı bir istekle **top hızını topun yanına km/h 
 5. Kalan orta öncelik maddeleri (§3): `int(fps)`, fourcc, `main()` adlandırması, in-place frame mutasyonu, `refine_kps` netliği, hardcoded sınırlar
 6. Konfigürasyon merkezileştirme, logging, tip ipuçları
 7. Ölü kod temizliği (`matplotlib` importu vb.)
-8. README güncellemesi (tam komut örneği, ağırlık dosyası yerleşimi, Python sürümü, artık dinamik çözünürlük desteklendiği için 1280x720 zorunluluğu notunun düzeltilmesi)
 
 ---
 
