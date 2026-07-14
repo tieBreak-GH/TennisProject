@@ -47,12 +47,12 @@ Bir konfigürasyonun 4 noktası bulunmuş ama geriye kalan hiçbir nokta tespit 
 ### 2.2 `torch.no_grad()` kullanılmıyor
 **✅ Düzeltildi:** `ball_detector.py` ve `court_detection_net.py`'deki `infer_model` gövdeleri `with torch.no_grad():` içine alındı.
 
-### 2.3 Batch'lenmemiş, tekrarlı ön işleme — ⏳ açık
-- `ball_detector.py`: her adımda 3 kare yeniden resize ediliyor.
-- Tüm modeller batch=1 çalışıyor.
-- Top ve saha modeli için kare ayrı ayrı resize ediliyor.
+### 2.3 Batch'lenmemiş, tekrarlı ön işleme — kısmen düzeltildi
+- `ball_detector.py`: **✅ Düzeltildi** — her adımda 3 kare yeniden resize etmek yerine `resized_prev`/`resized_preprev` önbelleğe alınıyor (bit-birebir aynı çıktı doğrulandı).
+- `court_detection_net.py`: **✅ Düzeltildi** — kamera sahne boyunca sabit kabul edilip, her sahnenin ilk birkaç karesi (`max_probe_frames=5`) prob edilip bulunan homografi sahnenin tamamına yayılıyor (§7). Gerçek videoda saha tespiti maliyeti ~29.7s'den ~3.8s'ye düştü.
+- Tüm modeller hâlâ batch=1 çalışıyor (⏳ açık, gerçek kazanç görece küçük — top/saha modelleri zaten kare-bağımlı çalışıyor).
 
-**Öneri (değişmedi):** Cache'leme, batch inference, paylaşılan resize.
+**Öneri (değişmedi, kalan kısım için):** Batch inference.
 
 ### 2.4 `sympy` ile kesişim hesabı — aşırı yavaş ve ağır bağımlılık
 **✅ Düzeltildi:** `postprocess.py`'deki `line_intersection`, sembolik `sympy.Line.intersection()` yerine basit determinant formülüne (numpy/saf Python) geçirildi. Sympy sürümüne karşı 200 rastgele doğru çifti + paralel doğru edge-case'iyle test edildi: **0 uyuşmazlık**. `sympy` bağımlılığı `requirements.txt`'ten tamamen kaldırıldı.
@@ -115,14 +115,37 @@ Rapor kapsamı dışında, ayrı bir istekle **top hızını topun yanına km/h 
 - ✅ Orta öncelik: CLI doğrulaması, anlamsız `len(person[0])>0` kontrolü
 - ✅ Bonus: top hızı özelliği (§5)
 
+**Tamamlanan (sonraki oturumda — §7):**
+- ✅ §2.3 kısmen — court detection sahne bazlı önbellekleme
+- ✅ Person detector için daha hızlı alternatif — Faster R-CNN → YOLO11n
+
 **Kısa vade (1-2 gün) — hâlâ açık:**
 1. Streaming pipeline — belleğe tüm videoyu almadan sahne bazlı işle-yaz (§2.1)
-2. Batch inference + paylaşılan ön işleme (§2.3)
+2. Batch inference (§2.3 kalan kısmı)
 3. Saf fonksiyonlara kalıcı birim testler (§4)
+4. `utils.py`'nin `scene_detect()`'indeki redundant ikinci video decode'unu kaldırma (§7'de bilinçli olarak ertelendi)
 
 **Orta vade (1 hafta+) — hâlâ açık:**
-4. Kalan orta öncelik maddeleri (§3): `int(fps)`, fourcc, `main()` adlandırması, in-place frame mutasyonu, `refine_kps` netliği, hardcoded sınırlar
-5. Konfigürasyon merkezileştirme, logging, tip ipuçları
-6. Ölü kod temizliği (`matplotlib` importu vb.)
-7. README güncellemesi (tam komut örneği, ağırlık dosyası yerleşimi, Python sürümü)
-8. Person detector için daha hızlı alternatif (ör. YOLO ailesi) değerlendirmesi
+5. Kalan orta öncelik maddeleri (§3): `int(fps)`, fourcc, `main()` adlandırması, in-place frame mutasyonu, `refine_kps` netliği, hardcoded sınırlar
+6. Konfigürasyon merkezileştirme, logging, tip ipuçları
+7. Ölü kod temizliği (`matplotlib` importu vb.)
+8. README güncellemesi (tam komut örneği, ağırlık dosyası yerleşimi, Python sürümü, artık dinamik çözünürlük desteklendiği için 1280x720 zorunluluğu notunun düzeltilmesi)
+
+---
+
+## 7. Near Real-Time İşleme: Saha Önbellekleme + YOLO
+
+Kullanıcı, videonun kendi süresine yakın bir sürede (batch, canlı akış değil) işlenip işlenemeyeceğini sordu. Ölçülen baseline (713 kare/29.7s klip, `detect_persons=False`, MPS): **83.4s**. İki değişiklik yapıldı:
+
+- **`court_detection_net.py`:** Per-frame gövde `_infer_frame()`'e çıkarıldı; `infer_model(frames, scenes, max_probe_frames=5)` artık her sahnenin ilk birkaç karesini deneyip bulduğu homografiyi sahnenin tamamına yayıyor (kamera sahne boyunca sabit kabul ediliyor). Saf broadcast mantığı mock testlerle doğrulandı. Gerçek videoda saha tespiti ~29.7s → ~3.8s.
+- **`person_detector.py`:** Faster R-CNN → **YOLO11n** (`ultralytics`). `__init__`/`detect()` değişti, geri kalan metodlar (`detect_top_and_bottom_players`, `filter_players`, `track_players`) dokunulmadan aynı `(boxes, probs)` formatını tüketmeye devam ediyor. Gerçek karelerde CPU'da **16.1ms/kare**, MPS'te **11.0ms/kare** ölçüldü — eski Faster R-CNN'in CPU'da 575ms/kare, MPS'te ~38.9s/kare olan maliyetine göre büyük kazanç, ve MPS'te Faster R-CNN'deki gibi bir performans çukuru **yok** (aksine MPS burada CPU'dan hızlı). Bu nedenle `main.py`'de `person_device` seçimi artık `ball_court_device` ile aynı politikayı (`prefer_alt_gpu=True`) kullanıyor.
+- **Bilinçli olarak kapsam dışı bırakıldı:** `utils.py`'nin `scene_detect()`'i hâlâ videoyu PySceneDetect ile ikinci kez baştan okuyor (`read_video()`'nun kendi decode'una ek olarak). Kazanç görece küçük görüldüğü için bu turda dokunulmadı; ileride ayrı bir iyileştirme olarak ele alınabilir.
+- **Sonuç:** Gerçek (tenis sahası içermeyen, sadece pipeline/regresyon testi için kullanılan `input_video.mp4`) videoda toplam süre `detect_persons=True` ile **55.97s** (713 kare/~31s klip) — eski `detect_persons=False` baseline'ı olan 83.4s'den daha hızlı, üstelik bu sefer oyuncu tespiti de dahil.
+
+### 7.1 Regresyon: YOLO ile oyuncu kutuları hiç çizilmiyordu — ✅ düzeltildi
+
+Gerçek bir ATP maçı videosuyla (1920x1080, 214 kare) uçtan uca test edildiğinde, oyuncular sahada açıkça görünür olmasına rağmen **hiçbir oyuncu kutusu çizilmedi**. Kök neden: `detect_top_and_bottom_players` içindeki sabit `person_min_score=0.85` eşiği Faster R-CNN'in güven skoru kalibrasyonuna göre ayarlanmıştı. YOLO11n aynı gerçek oyuncular için çok daha düşük skorlar üretiyor — ölçülen gerçek örnekte ön plandaki oyuncu 0.84 (eşiğin az altında), arka plandaki oyuncu ise sadece 0.44 skor aldı (eşiğin çok altında), ikisi de reddedildi.
+
+Saha-maskesi tabanlı filtre (`mask_top_court`/`mask_bottom_court`) zaten seyirci/topçu çocuğu gibi sahada olmayan kişileri konumlarına göre güvenle eliyor — birden fazla gerçek karede test edildi, eşik 0.3'e düşürülünce her karede tam olarak 1 üst + 1 alt oyuncu doğru şekilde süzülüyor, sahaya girmeyen 5-7 diğer tespit (seyirci, hakem, topçu çocuk) maskeler tarafından eleniyor. **Düzeltme:** eşik `0.85` → `0.3`. Aynı gerçek videoda önce/sonra ekran görüntüleriyle doğrulandı: düzeltmeden önce 0 kutu, sonra her iki oyuncu da doğru kutu ve minimap noktasıyla görünüyor.
+
+Aynı testte top sekmesi işaretleme mekanizması (3/3 sekme, minimap üzerinde doğru konumlarda) ayrıca doğrulandı — bu tarafta bir regresyon bulunamadı; sekmeler yalnızca gerçekleştikleri kareden itibaren haritada birikimli olarak görünüyor (beklenen davranış).

@@ -20,8 +20,8 @@ It was used neural network for detection 14 points of tennis court. For more inf
 - **NVIDIA (CUDA)**: works out of the box, no setup beyond a normal `pip install` with matching NVIDIA drivers.
 - **AMD on Linux (ROCm)**: works out of the box if you install a ROCm build of PyTorch (see https://pytorch.org for the right `--index-url`) — no code changes needed.
 - **Apple Silicon (MPS)**: used automatically for ball/court detection when available.
-- **AMD/Intel/NVIDIA on Windows (DirectML)**: optional, unverified — install `pip install torch-directml` yourself and the code will pick it up automatically for ball/court detection. This package is experimental and its last release may not match the `torch` version pinned in `requirements.txt`, so it isn't installed by default; test compatibility in your own environment.
-- Player detection (Faster R-CNN) always stays on CPU/CUDA — MPS measured ~67x slower for this model, and DirectML is assumed to have the same risk until proven otherwise.
+- **AMD/Intel/NVIDIA on Windows (DirectML)**: optional, unverified — install `pip install torch-directml` yourself and the code will pick it up automatically for all three models. This package is experimental and its last release may not match the `torch` version pinned in `requirements.txt`, so it isn't installed by default; test compatibility in your own environment.
+- Player detection uses YOLO (`ultralytics`) and shares the same device selection as ball/court detection — benchmarked at ~11ms/frame on MPS vs ~16ms/frame on CPU (Apple M-series), so no MPS performance pit like the old Faster R-CNN detector had.
 
 ### How to run
 Prepare a video file with resolution 1280x720

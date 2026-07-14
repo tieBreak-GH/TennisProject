@@ -1,7 +1,5 @@
-import torchvision
-from torchvision.models.detection import FasterRCNN_ResNet50_FPN_Weights
 import cv2
-import torch
+from ultralytics import YOLO
 from court_reference import CourtReference
 from scipy import signal
 import numpy as np
@@ -10,10 +8,7 @@ from tqdm import tqdm
 
 class PersonDetector():
     def __init__(self, device='cpu'):
-        self.detection_model = torchvision.models.detection.fasterrcnn_resnet50_fpn(
-            weights=FasterRCNN_ResNet50_FPN_Weights.DEFAULT)
-        self.detection_model = self.detection_model.to(device)
-        self.detection_model.eval()
+        self.detection_model = YOLO('yolo11n.pt')
         self.device = device
         self.court_ref = CourtReference()
         self.ref_top_court = self.court_ref.get_court_mask(2)
@@ -23,21 +18,14 @@ class PersonDetector():
         self.counter_top = 0
         self.counter_bottom = 0
 
-        
-    def detect(self, image, person_min_score=0.85): 
-        PERSON_LABEL = 1
-        frame_tensor = image.transpose((2, 0, 1)) / 255
-        frame_tensor = torch.from_numpy(frame_tensor).unsqueeze(0).float().to(self.device)
-        
-        with torch.no_grad():
-            preds = self.detection_model(frame_tensor)
-            
-        persons_boxes = []
-        probs = []
-        for box, label, score in zip(preds[0]['boxes'][:], preds[0]['labels'], preds[0]['scores']):
-            if label == PERSON_LABEL and score > person_min_score:    
-                persons_boxes.append(box.detach().cpu().numpy())
-                probs.append(score.detach().cpu().numpy())
+
+    def detect(self, image, person_min_score=0.85):
+        PERSON_CLASS = 0  # COCO "person" class
+        results = self.detection_model.predict(image, classes=[PERSON_CLASS], conf=person_min_score,
+                                                device=self.device, verbose=False)[0]
+
+        persons_boxes = [box.cpu().numpy() for box in results.boxes.xyxy]
+        probs = [float(score) for score in results.boxes.conf]
         return persons_boxes, probs
     
     def detect_top_and_bottom_players(self, image, inv_matrix, filter_players=False):
@@ -46,7 +34,13 @@ class PersonDetector():
         mask_bottom_court = cv2.warpPerspective(self.ref_bottom_court, matrix, image.shape[1::-1])
         person_bboxes_top, person_bboxes_bottom = [], []
 
-        bboxes, probs = self.detect(image, person_min_score=0.85)
+        # YOLO's confidence calibration runs much lower than the old Faster
+        # R-CNN's for small/distant players (measured as low as ~0.44 for the
+        # far player in a real broadcast frame, vs Faster R-CNN's usual >0.9)
+        # - the top/bottom court-mask filter below does the real work of
+        # rejecting non-players (ball kids, officials, crowd), so this can
+        # stay low without letting false positives through.
+        bboxes, probs = self.detect(image, person_min_score=0.3)
         if len(bboxes) > 0:
             person_points = [[int((bbox[2] + bbox[0]) / 2), int(bbox[3])] for bbox in bboxes]
             person_bboxes = list(zip(bboxes, person_points))

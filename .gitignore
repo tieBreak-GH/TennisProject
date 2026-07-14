@@ -3,6 +3,7 @@ venv/
 
 # Model Weights
 weights/
+yolo11n.pt
 
 # Python Cache
 __pycache__/

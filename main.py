@@ -167,14 +167,11 @@ def write(imgs_res, fps, path_output_video):
 def _select_device(prefer_alt_gpu=True):
     """
     :params
-        prefer_alt_gpu: whether a non-CUDA GPU backend (Apple MPS or Windows
-            DirectML, via the optional torch_directml package) is a safe
-            choice for this model. Both are newer, less mature backends
-            where torchvision's detection ops (NMS/ROI-align) have been
-            measured (MPS: ~67x slower than CPU on an Apple M5 Pro) or are
-            suspected but UNVERIFIED (DirectML - no AMD/Windows hardware
-            available to test) to run far slower than CPU - so callers must
-            opt out for the person detector.
+        prefer_alt_gpu: whether to try a non-CUDA GPU backend (Apple MPS, or
+            Windows DirectML via the optional torch_directml package) before
+            falling back to CPU. DirectML remains UNVERIFIED (no AMD/Windows
+            hardware available to test); callers that need a guaranteed-safe
+            fallback can pass False.
     """
     if torch.cuda.is_available():
         return 'cuda'
@@ -197,12 +194,10 @@ def process_video(path_ball_track_model, path_court_model, path_bounce_model,
     Run the full analysis pipeline on a video and write the annotated result.
     :params
         device: force a specific torch device for all models, or None to
-            auto-select per model (see _select_device). If the resolved device
-            is 'mps', person detection is forced to 'cpu' regardless (see
-            _select_device's docstring for why).
-        detect_persons: whether to run player detection at all. Faster R-CNN is
-            the heaviest of the three models; set False to skip it entirely and
-            speed up runs that only care about ball speed / court overlay.
+            auto-select per model (see _select_device).
+        detect_persons: whether to run player detection at all. Set False to
+            skip it entirely and speed up runs that only care about ball
+            speed / court overlay.
         progress_callback: optional callable(str) invoked with a status message
             before each pipeline stage, so callers (e.g. a web UI) can show progress
     :return
@@ -215,13 +210,13 @@ def process_video(path_ball_track_model, path_court_model, path_bounce_model,
 
     if device is None:
         ball_court_device = _select_device(prefer_alt_gpu=True)
-        person_device = _select_device(prefer_alt_gpu=False)
+        # YOLO (unlike the old Faster R-CNN person detector) was benchmarked
+        # at 11ms/frame on MPS vs 16ms/frame on CPU - no MPS performance pit,
+        # so it can share the same device-selection policy as ball/court.
+        person_device = _select_device(prefer_alt_gpu=True)
     else:
         ball_court_device = device
         person_device = device
-        if device == 'mps':
-            person_device = 'cpu'
-            report('not: oyuncu tespiti MPS\'te çok yavaş çalıştığı için CPU\'ya düşürüldü')
 
     report('video okunuyor')
     frames, fps = read_video(path_input_video)
@@ -233,7 +228,7 @@ def process_video(path_ball_track_model, path_court_model, path_bounce_model,
 
     report('court detection ({})'.format(ball_court_device))
     court_detector = CourtDetectorNet(path_court_model, ball_court_device)
-    homography_matrices, kps_court = court_detector.infer_model(frames)
+    homography_matrices, kps_court = court_detector.infer_model(frames, scenes=scenes)
 
     if detect_persons:
         report('person detection ({})'.format(person_device))
