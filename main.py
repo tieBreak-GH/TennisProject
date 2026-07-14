@@ -164,20 +164,29 @@ def write(imgs_res, fps, path_output_video):
     out.release()    
 
 
-def _select_device(prefer_mps=True):
+def _select_device(prefer_alt_gpu=True):
     """
     :params
-        prefer_mps: whether Apple's MPS backend is a safe choice for this model.
-            Measured on an Apple M5 Pro: BallTrackerNet-based models (ball/court
-            detection) run ~9x faster on MPS than CPU, but torchvision's Faster
-            R-CNN (person detection) runs ~67x SLOWER on MPS than CPU (its
-            NMS/ROI-align ops aren't well optimized on that backend yet) -
-            so callers must opt out of MPS for that model.
+        prefer_alt_gpu: whether a non-CUDA GPU backend (Apple MPS or Windows
+            DirectML, via the optional torch_directml package) is a safe
+            choice for this model. Both are newer, less mature backends
+            where torchvision's detection ops (NMS/ROI-align) have been
+            measured (MPS: ~67x slower than CPU on an Apple M5 Pro) or are
+            suspected but UNVERIFIED (DirectML - no AMD/Windows hardware
+            available to test) to run far slower than CPU - so callers must
+            opt out for the person detector.
     """
     if torch.cuda.is_available():
         return 'cuda'
-    if prefer_mps and torch.backends.mps.is_available():
-        return 'mps'
+    if prefer_alt_gpu:
+        if torch.backends.mps.is_available():
+            return 'mps'
+        try:
+            import torch_directml
+            if torch_directml.is_available():
+                return torch_directml.device()
+        except ImportError:
+            pass
     return 'cpu'
 
 
@@ -205,8 +214,8 @@ def process_video(path_ball_track_model, path_court_model, path_bounce_model,
             progress_callback(message)
 
     if device is None:
-        ball_court_device = _select_device(prefer_mps=True)
-        person_device = _select_device(prefer_mps=False)
+        ball_court_device = _select_device(prefer_alt_gpu=True)
+        person_device = _select_device(prefer_alt_gpu=False)
     else:
         ball_court_device = device
         person_device = device

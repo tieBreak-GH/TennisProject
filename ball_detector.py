@@ -10,7 +10,7 @@ class BallDetector:
         self.model = BallTrackerNet(input_channels=9, out_channels=256)
         self.device = device
         if path_model:
-            self.model.load_state_dict(torch.load(path_model, map_location=device, weights_only=True))
+            self.model.load_state_dict(torch.load(path_model, map_location='cpu', weights_only=True))
             self.model = self.model.to(device)
             self.model.eval()
         self.width = 640
