@@ -7,8 +7,10 @@ from bounce_detector import BounceDetector
 from person_detector import PersonDetector
 from ball_detector import BallDetector
 from speed_estimator import get_ball_speed, get_shot_max_speed
+from rally_analyzer import analyze_rallies, select_highlights
 from utils import scene_detect
 import argparse
+import time
 import torch
 
 def read_video(path_video):
@@ -32,7 +34,7 @@ def get_court_img():
     return court_img
 
 def main(frames, scenes, bounces, ball_track, homography_matrices, kps_court, persons_top, persons_bottom,
-         ball_speed=None, shot_max_speed=None, draw_trace=False, trace=7):
+         ball_speed=None, shot_max_speed=None, serve_frames=None, draw_trace=False, trace=7):
     """
     :params
         frames: list of original images
@@ -49,6 +51,9 @@ def main(frames, scenes, bounces, ball_track, homography_matrices, kps_court, pe
         shot_max_speed: list of per-frame "current shot" peak speed (km/h, see
             speed_estimator.get_shot_max_speed), or None to skip. Shown as a fixed,
             stable HUD (readable while the ball is moving) alongside the ball_speed tag.
+        serve_frames: set of frame indices belonging to a shot labeled as a serve
+            (see rally_analyzer.analyze_rallies), or None to skip. Drawn next to
+            the ball for the whole serve shot's duration.
         draw_trace: whether to draw ball trace
         trace: the length of ball trace
     :return
@@ -98,6 +103,14 @@ def main(frames, scenes, bounces, ball_track, homography_matrices, kps_court, pe
                               fontScale=0.8,
                               thickness=2,
                               color=(0, 255, 0))
+
+                    if serve_frames is not None and i in serve_frames:
+                        img_res = cv2.putText(img_res, 'SERVIS',
+                              org=(int(ball_track[i][0]) + 8, int(ball_track[i][1]) + 52),
+                              fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+                              fontScale=0.8,
+                              thickness=2,
+                              color=(0, 255, 255))
 
                 # draw court keypoints
                 if kps_court[i] is not None:
@@ -161,7 +174,34 @@ def write(imgs_res, fps, path_output_video):
     for num in range(len(imgs_res)):
         frame = imgs_res[num]
         out.write(frame)
-    out.release()    
+    out.release()
+
+
+def write_highlights(imgs_res, highlights, fps, output_dir):
+    """
+    Write each selected highlight rally (see rally_analyzer.select_highlights)
+    as its own short clip, reusing the already-rendered frames (ball/court/
+    speed overlays included) - no re-inference needed.
+    :params
+        imgs_res: list of rendered frames, as returned by main()
+        highlights: list of {rally, reasons} dicts from select_highlights
+        fps: video frame rate
+        output_dir: directory to write clips into (created if missing)
+    :return
+        list of dicts {rally_no, reasons, path} for each clip actually written
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    clips = []
+    for h in highlights:
+        rally = h['rally']
+        frames = imgs_res[rally['start_frame']:rally['end_frame']]
+        if not frames:
+            continue
+        reason_tag = '_'.join(h['reasons'])
+        path = os.path.join(output_dir, 'highlight_rally{:02d}_{}.mp4'.format(rally['rally_no'], reason_tag))
+        write(frames, fps, path)
+        clips.append({'rally_no': rally['rally_no'], 'reasons': h['reasons'], 'path': path})
+    return clips
 
 
 def _select_device(prefer_alt_gpu=True):
@@ -189,7 +229,8 @@ def _select_device(prefer_alt_gpu=True):
 
 def process_video(path_ball_track_model, path_court_model, path_bounce_model,
                    path_input_video, path_output_video, draw_trace=True, device=None,
-                   detect_persons=True, progress_callback=None):
+                   detect_persons=True, progress_callback=None,
+                   generate_highlights=False, highlights_dir=None, highlights_top_n=3):
     """
     Run the full analysis pipeline on a video and write the annotated result.
     :params
@@ -198,15 +239,28 @@ def process_video(path_ball_track_model, path_court_model, path_bounce_model,
         detect_persons: whether to run player detection at all. Set False to
             skip it entirely and speed up runs that only care about ball
             speed / court overlay.
-        progress_callback: optional callable(str) invoked with a status message
-            before each pipeline stage, so callers (e.g. a web UI) can show progress
+        progress_callback: optional callable(message, fraction, eta_seconds)
+            invoked before each pipeline stage, so callers (e.g. a web UI) can
+            show a real progress bar. fraction is 0..1 (coarse, one stage
+            granularity - not per-frame). eta_seconds is the estimated time
+            left based on elapsed time / fraction so far, or None on the
+            first call (no elapsed time to extrapolate from yet).
+        generate_highlights: whether to also cut short clips for the
+            fastest-shot / longest rallies (see rally_analyzer.select_highlights).
+        highlights_dir: directory to write highlight clips into, or None to
+            use a 'highlights' subfolder next to path_output_video.
+        highlights_top_n: how many rallies to pick per highlight criterion.
     :return
         stats: dict summary (frame count, fps, bounce count, ball speed min/max/avg, devices used)
     """
-    def report(message):
-        print(message)
+    start_time = time.time()
+
+    def report(message, fraction):
+        elapsed = time.time() - start_time
+        eta = elapsed * (1 - fraction) / fraction if fraction > 0 else None
+        print('[{:.0%}] {}'.format(fraction, message))
         if progress_callback:
-            progress_callback(message)
+            progress_callback(message, fraction, eta)
 
     if device is None:
         ball_court_device = _select_device(prefer_alt_gpu=True)
@@ -218,27 +272,27 @@ def process_video(path_ball_track_model, path_court_model, path_bounce_model,
         ball_court_device = device
         person_device = device
 
-    report('video okunuyor')
+    report('video okunuyor', 0.02)
     frames, fps = read_video(path_input_video)
     scenes = scene_detect(path_input_video)
 
-    report('ball detection ({})'.format(ball_court_device))
+    report('ball detection ({})'.format(ball_court_device), 0.05)
     ball_detector = BallDetector(path_ball_track_model, ball_court_device)
     ball_track = ball_detector.infer_model(frames)
 
-    report('court detection ({})'.format(ball_court_device))
+    report('court detection ({})'.format(ball_court_device), 0.55)
     court_detector = CourtDetectorNet(path_court_model, ball_court_device)
     homography_matrices, kps_court = court_detector.infer_model(frames, scenes=scenes)
 
     if detect_persons:
-        report('person detection ({})'.format(person_device))
+        report('person detection ({})'.format(person_device), 0.65)
         person_detector = PersonDetector(person_device)
         persons_top, persons_bottom = person_detector.track_players(frames, homography_matrices, filter_players=False)
     else:
         persons_top = [[] for _ in frames]
         persons_bottom = [[] for _ in frames]
 
-    report('bounce detection')
+    report('bounce detection', 0.72)
     bounce_detector = BounceDetector(path_bounce_model)
     x_ball = [x[0] for x in ball_track]
     y_ball = [x[1] for x in ball_track]
@@ -247,23 +301,42 @@ def process_video(path_ball_track_model, path_court_model, path_bounce_model,
     ball_speed = get_ball_speed(ball_track, homography_matrices, fps)
     shot_max_speed = get_shot_max_speed(ball_speed, bounces)
 
-    report('video oluşturuluyor')
-    imgs_res = main(frames, scenes, bounces, ball_track, homography_matrices, kps_court, persons_top, persons_bottom,
-                    ball_speed=ball_speed, shot_max_speed=shot_max_speed, draw_trace=draw_trace)
+    rallies = analyze_rallies(ball_track, bounces, homography_matrices, ball_speed, fps)
+    serve_frames = set()
+    for r in rallies:
+        for s in r['shots']:
+            if s['is_serve']:
+                serve_frames.update(range(s['start_frame'], s['end_frame']))
 
+    report('video oluşturuluyor', 0.78)
+    imgs_res = main(frames, scenes, bounces, ball_track, homography_matrices, kps_court, persons_top, persons_bottom,
+                    ball_speed=ball_speed, shot_max_speed=shot_max_speed, serve_frames=serve_frames,
+                    draw_trace=draw_trace)
+
+    report('video yazılıyor', 0.92)
     write(imgs_res, fps, path_output_video)
+
+    highlight_clips = []
+    if generate_highlights:
+        report('highlight klipleri oluşturuluyor', 0.97)
+        highlights = select_highlights(rallies, top_n=highlights_top_n)
+        out_dir = highlights_dir or os.path.join(os.path.dirname(os.path.abspath(path_output_video)), 'highlights')
+        highlight_clips = write_highlights(imgs_res, highlights, fps, out_dir)
 
     valid_speeds = [s for s in ball_speed if s is not None]
     stats = {
         'num_frames': len(frames),
         'fps': fps,
         'num_bounces': len(bounces),
+        'num_rallies': len(rallies),
+        'rallies': rallies,
+        'highlight_clips': highlight_clips,
         'max_speed_kmh': max(valid_speeds) if valid_speeds else None,
         'avg_speed_kmh': (sum(valid_speeds) / len(valid_speeds)) if valid_speeds else None,
         'ball_court_device': ball_court_device,
         'person_device': person_device if detect_persons else None,
     }
-    report('tamamlandı')
+    report('tamamlandı', 1.0)
     return stats
 
 
