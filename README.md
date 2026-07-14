@@ -22,6 +22,11 @@ Each ball position is projected into real-world court coordinates (cm) via the c
 ### Web UI
 Run `streamlit run app.py` for a browser-based UI: upload a video, optionally skip player detection for a faster run, and download the annotated result with ball speed / bounce / court overlay.
 
+For a one-click launch (creates/activates the virtual environment, installs requirements on first run, and opens the app in your browser), use the script for your OS:
+- **macOS**: double-click `run_app_mac.command` (or run it from a terminal)
+- **Linux**: `./run_app_linux.sh`
+- **Windows**: double-click `run_app_windows.bat`
+
 ### GPU support
 - **NVIDIA (CUDA)**: works out of the box, no setup beyond a normal `pip install` with matching NVIDIA drivers.
 - **AMD on Linux (ROCm)**: works out of the box if you install a ROCm build of PyTorch (see https://pytorch.org for the right `--index-url`) — no code changes needed.
