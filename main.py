@@ -5,6 +5,7 @@ from court_reference import CourtReference
 from bounce_detector import BounceDetector
 from person_detector import PersonDetector
 from ball_detector import BallDetector
+from speed_estimator import get_ball_speed
 from utils import scene_detect
 import argparse
 import torch
