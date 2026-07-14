@@ -1,23 +1,24 @@
 import cv2
 import numpy as np
-from sympy import Line
 from scipy.spatial import distance
-from sympy.geometry.point import Point2D
 
 
 def line_intersection(line1, line2):
     """
-    Find 2 lines intersection point
+    Find the intersection point of 2 infinite lines, each given as (x1, y1, x2, y2)
     """
-    l1 = Line((line1[0], line1[1]), (line1[2], line1[3]))
-    l2 = Line((line2[0], line2[1]), (line2[2], line2[3]))
+    x1, y1, x2, y2 = line1
+    x3, y3, x4, y4 = line2
 
-    intersection = l1.intersection(l2)
-    point = None
-    if len(intersection) > 0:
-        if isinstance(intersection[0], Point2D):
-            point = intersection[0].coordinates
-    return point 
+    denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
+    if denom == 0:
+        return None
+
+    a = x1 * y2 - y1 * x2
+    b = x3 * y4 - y3 * x4
+    px = (a * (x3 - x4) - (x1 - x2) * b) / denom
+    py = (a * (y3 - y4) - (y1 - y2) * b) / denom
+    return (px, py)
 
 def refine_kps(img, x_ct, y_ct, crop_size=40):
     refined_x_ct, refined_y_ct = x_ct, y_ct
@@ -36,7 +37,7 @@ def refine_kps(img, x_ct, y_ct, crop_size=40):
         lines = merge_lines(lines)
         if len(lines) == 2:
             inters = line_intersection(lines[0], lines[1])
-            if inters:
+            if inters is not None:
                 new_x_ct = int(inters[1])
                 new_y_ct = int(inters[0])
                 if new_x_ct > 0 and new_x_ct < img_crop.shape[0] and new_y_ct > 0 and new_y_ct < img_crop.shape[1]:

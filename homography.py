@@ -19,7 +19,7 @@ def get_trans_matrix(points):
     Determine the best homography matrix from court points
     """
     matrix_trans = None
-    dist_max = np.inf
+    best_error = np.inf
     for conf_ind in range(1, 13):
         conf = court_ref.court_conf[conf_ind]
 
@@ -32,11 +32,13 @@ def get_trans_matrix(points):
             for i in range(12):
                 if i not in inds and points[i] is not None:
                     dists.append(distance.euclidean(points[i], trans_kps[i]))
-            dist_median = np.mean(dists)
-            if dist_median < dist_max:
+            if not dists:
+                continue
+            mean_error = np.mean(dists)
+            if mean_error < best_error:
                 matrix_trans = matrix
-                dist_max = dist_median
-    return matrix_trans 
+                best_error = mean_error
+    return matrix_trans
 
 
 

@@ -63,12 +63,12 @@ class BounceDetector:
         interp = 5
         counter = 0
         for num in range(interp, len(x_ball)-1):
-            if not x_ball[num] and sum(is_none[num-interp:num]) == 0 and counter < 3:
+            if x_ball[num] is None and sum(is_none[num-interp:num]) == 0 and counter < 3:
                 x_ext, y_ext = self.extrapolate(x_ball[num-interp:num], y_ball[num-interp:num])
                 x_ball[num] = x_ext
                 y_ball[num] = y_ext
                 is_none[num] = 0
-                if x_ball[num+1]:
+                if x_ball[num+1] is not None:
                     dist = distance.euclidean((x_ext, y_ext), (x_ball[num+1], y_ball[num+1]))
                     if dist > 80:
                         x_ball[num+1], y_ball[num+1], is_none[num+1] = None, None, 1

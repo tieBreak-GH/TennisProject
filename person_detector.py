@@ -1,4 +1,5 @@
 import torchvision
+from torchvision.models.detection import FasterRCNN_ResNet50_FPN_Weights
 import cv2
 import torch
 from court_reference import CourtReference
@@ -8,11 +9,12 @@ from scipy.spatial import distance
 from tqdm import tqdm
 
 class PersonDetector():
-    def __init__(self, dtype=torch.FloatTensor):
-        self.detection_model = torchvision.models.detection.fasterrcnn_resnet50_fpn(pretrained=True)
-        self.detection_model = self.detection_model.to(dtype)
+    def __init__(self, device='cpu'):
+        self.detection_model = torchvision.models.detection.fasterrcnn_resnet50_fpn(
+            weights=FasterRCNN_ResNet50_FPN_Weights.DEFAULT)
+        self.detection_model = self.detection_model.to(device)
         self.detection_model.eval()
-        self.dtype = dtype
+        self.device = device
         self.court_ref = CourtReference()
         self.ref_top_court = self.court_ref.get_court_mask(2)
         self.ref_bottom_court = self.court_ref.get_court_mask(1)
@@ -25,7 +27,7 @@ class PersonDetector():
     def detect(self, image, person_min_score=0.85): 
         PERSON_LABEL = 1
         frame_tensor = image.transpose((2, 0, 1)) / 255
-        frame_tensor = torch.from_numpy(frame_tensor).unsqueeze(0).float().to(self.dtype)
+        frame_tensor = torch.from_numpy(frame_tensor).unsqueeze(0).float().to(self.device)
         
         with torch.no_grad():
             preds = self.detection_model(frame_tensor)

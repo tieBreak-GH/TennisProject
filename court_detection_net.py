@@ -2,7 +2,6 @@ import cv2
 import numpy as np
 import torch
 from tracknet import BallTrackerNet
-import torch.nn.functional as F
 from tqdm import tqdm
 from postprocess import refine_kps
 from homography import get_trans_matrix, refer_kps
@@ -12,25 +11,28 @@ class CourtDetectorNet():
         self.model = BallTrackerNet(out_channels=15)
         self.device = device
         if path_model:
-            self.model.load_state_dict(torch.load(path_model, map_location=device))
+            self.model.load_state_dict(torch.load(path_model, map_location=device, weights_only=True))
             self.model = self.model.to(device)
             self.model.eval()
             
     def infer_model(self, frames):
         output_width = 640
         output_height = 360
-        scale = 2
-        
+
         kps_res = []
         matrixes_res = []
+        orig_height, orig_width = frames[0].shape[:2]
+        scale_x = orig_width / output_width
+        scale_y = orig_height / output_height
         for num_frame, image in enumerate(tqdm(frames)):
             img = cv2.resize(image, (output_width, output_height))
             inp = (img.astype(np.float32) / 255.)
             inp = torch.tensor(np.rollaxis(inp, 2, 0))
             inp = inp.unsqueeze(0)
 
-            out = self.model(inp.float().to(self.device))[0]
-            pred = F.sigmoid(out).detach().cpu().numpy()
+            with torch.no_grad():
+                out = self.model(inp.float().to(self.device))[0]
+            pred = torch.sigmoid(out).detach().cpu().numpy()
 
             points = []
             for kps_num in range(14):
@@ -39,8 +41,8 @@ class CourtDetectorNet():
                 circles = cv2.HoughCircles(heatmap, cv2.HOUGH_GRADIENT, dp=1, minDist=20, param1=50, param2=2,
                                            minRadius=10, maxRadius=25)
                 if circles is not None:
-                    x_pred = circles[0][0][0]*scale
-                    y_pred = circles[0][0][1]*scale
+                    x_pred = circles[0][0][0]*scale_x
+                    y_pred = circles[0][0][1]*scale_y
                     if kps_num not in [8, 12, 9]:
                         x_pred, y_pred = refine_kps(image, int(y_pred), int(x_pred), crop_size=40)
                     points.append((x_pred, y_pred))                
