@@ -8,9 +8,10 @@ You can check this blog post https://medium.com/@kosolapov.aetp/tennis-analysis-
 
 ## Features
 
-- **Ball detection**: TrackNet tracks the ball frame by frame. See https://github.com/yastrebksv/TrackNet.
-- **Court detection**: a CNN detects 14 court keypoints, cached per camera-angle scene for speed. See https://github.com/yastrebksv/TennisCourtDetector.
-- **Bounce detection**: a CatBoostRegressor predicts bounces from the ball's trajectory. Pretrained weights: https://drive.google.com/file/d/1Eo5HDnAQE8y_FbOftKZ8pjiojwuy2BmJ/view?usp=drive_link
+- **Ball detection**: TrackNet tracks the ball frame by frame. See https://github.com/yastrebksv/TrackNet. Pretrained weights: [ball_track_model.pt](https://drive.google.com/file/d/1XEYZ4myUN7QT-NeBYJI0xteLsvs-ZAOl/view?usp=sharing)
+- **Court detection**: a CNN detects 14 court keypoints, cached per camera-angle scene for speed. See https://github.com/yastrebksv/TennisCourtDetector. Pretrained weights: [court_model.pt](https://drive.google.com/file/d/1f-Co64ehgq4uddcQm1aFBDtbnyZhQvgG/view?usp=drive_link)
+- **Bounce detection**: a CatBoostRegressor predicts bounces from the ball's trajectory. Pretrained weights: [bounce_model.cbm](https://drive.google.com/file/d/1Eo5HDnAQE8y_FbOftKZ8pjiojwuy2BmJ/view?usp=drive_link)
+
 - **Player detection**: YOLO11n locates the top/bottom players and projects them onto a minimap.
 - **Ball speed**: each ball position is projected into real-world court coordinates (cm) via the court homography, giving an instantaneous speed (km/h) next to the ball plus a stable "peak speed of the current shot" HUD. Requires the court to be visible/tracked in frame.
 - **Rally & serve segmentation**: the video is split into rallies and shots from ball-tracking gaps and bounces; each rally's first shot is labeled a serve if it starts near a baseline.
@@ -46,10 +47,14 @@ Requires Python 3.9+.
 
 1. Clone the repository: `git clone https://github.com/tieBreak-GH/TennisProject.git`
 2. Run `pip install -r requirements.txt` to install packages required
-3. Download the pretrained weights (links above) and place them under `weights/`:
-   - `weights/ball_track_model.pt`
-   - `weights/court_model.pt`
-   - `weights/bounce_model.cbm`
+3. Download the pretrained weights by running the automated script:
+   ```bash
+   python download_weights.py
+   ```
+   Or download them manually and place them under a `weights/` directory:
+   - [ball_track_model.pt](https://drive.google.com/file/d/1XEYZ4myUN7QT-NeBYJI0xteLsvs-ZAOl/view?usp=sharing)
+   - [court_model.pt](https://drive.google.com/file/d/1f-Co64ehgq4uddcQm1aFBDtbnyZhQvgG/view?usp=drive_link)
+   - [bounce_model.cbm](https://drive.google.com/file/d/1Eo5HDnAQE8y_FbOftKZ8pjiojwuy2BmJ/view?usp=drive_link)
 4. Run the pipeline on a video (any resolution — frames are automatically rescaled to match the models):
    ```
    python main.py \
@@ -59,7 +64,8 @@ Requires Python 3.9+.
      --path_input_video input_video.mp4 \
      --path_output_video output_video.mp4
    ```
-   Or use the web UI instead: `streamlit run app.py`.
+   Or use the web UI instead (which will also check and download missing weights automatically): `streamlit run app.py`.
+
 
 ## Tests
 Pure-function unit tests (homography solving, line intersection, bounce postprocessing, rally/serve/line-call segmentation) live under `tests/` and don't need model weights or a GPU:

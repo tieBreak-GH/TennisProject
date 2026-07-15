@@ -58,6 +58,15 @@ if errorlevel 1 (
     exit /b 1
 )
 
+echo Model agirliklari kontrol ediliyor ve eksikse indiriliyor...
+python download_weights.py
+if errorlevel 1 (
+    echo.
+    echo UYARI: Model agirliklari indirilirken bir sorun olustu.
+    echo Internet baglantinizi kontrol edin veya agirliklari manuel indirin.
+    pause
+)
+
 echo Web arayuzu baslatiliyor (kapatmak icin bu pencereyi kapatabilirsiniz)...
 streamlit run app.py --server.port 8501 --server.headless false
 

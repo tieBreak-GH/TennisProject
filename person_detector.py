@@ -34,10 +34,17 @@ class PersonDetector():
         person_bboxes_top, person_bboxes_bottom = [], []
 
         if len(bboxes) > 0:
+            h, w = mask_top_court.shape[:2]
             person_points = [[int((bbox[2] + bbox[0]) / 2), int(bbox[3])] for bbox in bboxes]
             person_bboxes = list(zip(bboxes, person_points))
 
-            person_bboxes_top = [pt for pt in person_bboxes if mask_top_court[pt[1][1]-1, pt[1][0]] == 1]
-            person_bboxes_bottom = [pt for pt in person_bboxes if mask_bottom_court[pt[1][1] - 1, pt[1][0]] == 1]
+            for pt in person_bboxes:
+                x = np.clip(pt[1][0], 0, w - 1)
+                y = np.clip(pt[1][1] - 1, 0, h - 1)
+                if mask_top_court[y, x] == 1:
+                    person_bboxes_top.append(pt)
+                if mask_bottom_court[y, x] == 1:
+                    person_bboxes_bottom.append(pt)
 
         return person_bboxes_top, person_bboxes_bottom
+

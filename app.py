@@ -51,8 +51,62 @@ st.caption('Topu takip eder, hızını (km/h) hesaplar ve saha/oyuncu bilgisiyle
 
 missing_models = [p for p in (BALL_MODEL, COURT_MODEL, BOUNCE_MODEL) if not os.path.isfile(p)]
 if missing_models:
-    st.error('Model ağırlıkları bulunamadı:\n' + '\n'.join(missing_models))
+    st.warning('Model ağırlıkları bulunamadı. Uygulamanın çalışabilmesi için model ağırlıklarının indirilmesi gerekmektedir.')
+    st.write('Eksik dosyalar:\n' + '\n'.join([f"- {os.path.basename(p)}" for p in missing_models]))
+    if st.button('Model Ağırlıklarını İnternetten İndir', type='primary'):
+        import requests
+        from download_weights import WEIGHTS
+        
+        def download_with_progress(file_id, destination, filename):
+            url = "https://docs.google.com/uc?export=download"
+            session = requests.Session()
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3'
+            }
+            response = session.get(url, params={'id': file_id}, headers=headers, stream=True)
+            token = None
+            for key, value in response.cookies.items():
+                if key.startswith('download_warning'):
+                    token = value
+                    break
+            if token:
+                params = {'id': file_id, 'confirm': token}
+                response = session.get(url, params=params, headers=headers, stream=True)
+            response.raise_for_status()
+            
+            total_size = int(response.headers.get('content-length', 0))
+            block_size = 1024 * 1024  # 1MB
+            written = 0
+            
+            progress_bar = st.progress(0.0)
+            status_text = st.empty()
+            
+            with open(destination, 'wb') as f:
+                for data in response.iter_content(block_size):
+                    f.write(data)
+                    written += len(data)
+                    if total_size > 0:
+                        fraction = min(1.0, written / total_size)
+                        progress_bar.progress(fraction)
+                        status_text.caption(f"{filename} indiriliyor: %{fraction*100:.1f} ({written / (1024*1024):.1f} MB / {total_size / (1024*1024):.1f} MB)")
+                    else:
+                        status_text.caption(f"{filename} indiriliyor: {written / (1024*1024):.1f} MB")
+            progress_bar.empty()
+            status_text.empty()
+
+        try:
+            os.makedirs(WEIGHTS_DIR, exist_ok=True)
+            for filename, file_id in WEIGHTS.items():
+                dest_path = os.path.join(WEIGHTS_DIR, filename)
+                if not os.path.isfile(dest_path) or os.path.getsize(dest_path) == 0:
+                    st.info(f"'{filename}' indiriliyor...")
+                    download_with_progress(file_id, dest_path, filename)
+            st.success('Tüm model ağırlıkları başarıyla indirildi! Uygulama başlatılıyor...')
+            st.rerun()
+        except Exception as e:
+            st.error(f'İndirme sırasında hata oluştu: {e}')
     st.stop()
+
 
 with st.expander('Video çekim önerileri'):
     st.markdown(
