@@ -1,5 +1,8 @@
+import atexit
+import glob
 import json
 import os
+import shutil
 import tempfile
 
 import pandas as pd
@@ -14,6 +17,26 @@ BOUNCE_MODEL = os.path.join(WEIGHTS_DIR, 'bounce_model.cbm')
 
 HIGHLIGHT_REASON_LABELS = {'fastest': 'En hızlı vuruş', 'longest': 'En uzun ral(l)i'}
 LINE_CALL_LABELS = {'in': 'İçeride', 'out': 'Dışarıda', 'belirsiz': 'Belirsiz'}
+
+_TEMP_DIR_PREFIX = 'tennis_analysis_'
+
+
+def _cleanup_work_dir(work_dir):
+    """Remove one analysis's temp dir (input video, output video, highlights, ...)."""
+    if work_dir and os.path.isdir(work_dir):
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def _cleanup_all_temp_dirs():
+    """Best-effort sweep of every leftover analysis temp dir, used at process exit."""
+    pattern = os.path.join(tempfile.gettempdir(), _TEMP_DIR_PREFIX + '*')
+    for path in glob.glob(pattern):
+        _cleanup_work_dir(path)
+
+
+if '_cleanup_registered' not in st.session_state:
+    atexit.register(_cleanup_all_temp_dirs)
+    st.session_state._cleanup_registered = True
 
 
 def serve_cell(rally):
@@ -51,24 +74,31 @@ def format_eta(seconds):
 if 'results' not in st.session_state:
     st.session_state.results = []
 
-uploaded_files = st.file_uploader('Video yükleyin (birden fazla seçebilirsiniz)',
-                                   type=['mp4', 'mov', 'm4v', 'avi'], accept_multiple_files=True)
-detect_persons = st.checkbox('Oyuncuları tespit et', value=True,
-                              help='Kapatırsanız en ağır model (oyuncu tespiti) atlanır, işlem belirgin şekilde hızlanır; '
-                                   'ama oyuncu kutuları ve minimap noktaları oluşmaz.')
-generate_highlights = st.checkbox('Highlight klipleri oluştur', value=False,
-                                   help='En hızlı vuruşlu ve en uzun ral(l)ilerin kısa video klipleri otomatik olarak '
-                                        'ayrı dosyalar halinde kesilir.')
-highlights_top_n = 3
-if generate_highlights:
+with st.form('analiz_formu'):
+    uploaded_files = st.file_uploader('Video yükleyin (birden fazla seçebilirsiniz)',
+                                       type=['mp4', 'mov', 'm4v', 'avi'], accept_multiple_files=True)
+    detect_persons = st.checkbox('Oyuncuları tespit et', value=True,
+                                  help='Kapatırsanız en ağır model (oyuncu tespiti) atlanır, işlem belirgin şekilde hızlanır; '
+                                       'ama oyuncu kutuları ve minimap noktaları oluşmaz.')
+    generate_highlights = st.checkbox('Highlight klipleri oluştur', value=False,
+                                       help='En hızlı vuruşlu ve en uzun ral(l)ilerin kısa video klipleri otomatik olarak '
+                                            'ayrı dosyalar halinde kesilir.')
     highlights_top_n = st.slider('Kriter başına klip sayısı', min_value=1, max_value=5, value=3,
-                                  help='Örn. 3 seçilirse en fazla 3 "en hızlı vuruşlu" ve 3 "en uzun ral(l)i" klibi '
-                                       'kesilir (aynı ral(l)i iki kritere de girebilir).')
-trim_dead_time = st.checkbox('Ölü zamanı kırp (sadece ral(l)iler)', value=False,
-                              help='Ral(l)i olmayan bölümleri (top değişimi, servis öncesi bekleme vb.) atlayıp '
-                                   'sadece oyun anlarını içeren tek bir video oluşturur.')
+                                  help='Sadece "Highlight klipleri oluştur" işaretliyse geçerlidir. Örn. 3 seçilirse '
+                                       'en fazla 3 "en hızlı vuruşlu" ve 3 "en uzun ral(l)i" klibi kesilir (aynı '
+                                       'ral(l)i iki kritere de girebilir).')
+    trim_dead_time = st.checkbox('Ölü zamanı kırp (sadece ral(l)iler)', value=False,
+                                  help='Ral(l)i olmayan bölümleri (top değişimi, servis öncesi bekleme vb.) atlayıp '
+                                       'sadece oyun anlarını içeren tek bir video oluşturur.')
+    submitted = st.form_submit_button('Analiz Et', type='primary')
 
-if uploaded_files and st.button('Analiz Et', type='primary'):
+if submitted and uploaded_files:
+    # the previous batch's results are about to be replaced below, so their
+    # temp dirs (input/output video, highlights, ...) are no longer reachable
+    # from the UI - safe to free the disk space now
+    for prev in st.session_state.results:
+        _cleanup_work_dir(prev.get('work_dir'))
+
     overall_status = st.empty()
     progress_bar = st.empty()
     eta_caption = st.empty()
@@ -77,7 +107,7 @@ if uploaded_files and st.button('Analiz Et', type='primary'):
     total = len(uploaded_files)
     for idx, uploaded_file in enumerate(uploaded_files, start=1):
         overall_status.info('Video {}/{}: {}'.format(idx, total, uploaded_file.name))
-        work_dir = tempfile.mkdtemp(prefix='tennis_analysis_')
+        work_dir = tempfile.mkdtemp(prefix=_TEMP_DIR_PREFIX)
         input_path = os.path.join(work_dir, uploaded_file.name)
         with open(input_path, 'wb') as f:
             f.write(uploaded_file.getbuffer())
@@ -95,9 +125,11 @@ if uploaded_files and st.button('Analiz Et', type='primary'):
                                    generate_highlights=generate_highlights,
                                    highlights_top_n=highlights_top_n,
                                    trim_dead_time=trim_dead_time)
-            results.append({'name': uploaded_file.name, 'output_path': output_path, 'stats': stats, 'error': None})
+            results.append({'name': uploaded_file.name, 'work_dir': work_dir, 'output_path': output_path,
+                             'stats': stats, 'error': None})
         except Exception as e:
-            results.append({'name': uploaded_file.name, 'output_path': None, 'stats': None, 'error': str(e)})
+            results.append({'name': uploaded_file.name, 'work_dir': work_dir, 'output_path': None,
+                             'stats': None, 'error': str(e)})
 
     overall_status.empty()
     progress_bar.empty()
