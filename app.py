@@ -45,7 +45,7 @@ def serve_cell(rally):
         return '—'
     return LINE_CALL_LABELS.get(serve_shot['line_call'], 'Evet')
 
-st.set_page_config(page_title='Tenis Video Analizi', page_icon='🎾', layout='centered')
+st.set_page_config(page_title='Tenis Video Analizi', page_icon='🎾', layout='wide')
 st.title('🎾 Tenis Video Analizi')
 st.caption('Topu takip eder, hızını (km/h) hesaplar ve saha/oyuncu bilgisiyle birlikte videonun üzerine çizer.')
 

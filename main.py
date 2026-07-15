@@ -505,7 +505,7 @@ def process_video(path_ball_track_model, path_court_model, path_bounce_model,
     y_ball = [x[1] for x in ball_track]
     bounces = bounce_detector.predict(x_ball, y_ball)
 
-    ball_speed = get_ball_speed(ball_track, homography_matrices, fps)
+    ball_speed = get_ball_speed(ball_track, homography_matrices, fps, bounces)
     shot_max_speed = get_shot_max_speed(ball_speed, bounces)
 
     rallies = analyze_rallies(ball_track, bounces, homography_matrices, ball_speed, fps)

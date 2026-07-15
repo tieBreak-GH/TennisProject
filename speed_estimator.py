@@ -13,7 +13,27 @@ def _transform_point(point, matrix):
     return pt_trans[0, 0]
 
 
-def get_ball_speed(ball_track, homography_matrices, fps, window=config.BALL_SPEED_WINDOW_FRAMES,
+def _segment_start_per_frame(n, bounce_frames):
+    """
+    For each frame, the start of its bounce-to-bounce segment (same boundary
+    semantics as get_shot_max_speed/rally_analyzer.segment_shots: a bounce
+    frame belongs to the segment it starts, not the one it ends).
+    :return
+        list of length n, segment_start[i] <= i
+    """
+    boundaries = sorted(b for b in set(bounce_frames) if 0 <= b < n)
+    starts = [0] * n
+    seg_start = 0
+    b_idx = 0
+    for i in range(n):
+        if b_idx < len(boundaries) and boundaries[b_idx] == i:
+            seg_start = i
+            b_idx += 1
+        starts[i] = seg_start
+    return starts
+
+
+def get_ball_speed(ball_track, homography_matrices, fps, bounce_frames=(), window=config.BALL_SPEED_WINDOW_FRAMES,
                     max_speed_kmh=config.BALL_SPEED_MAX_KMH, smooth_window=config.BALL_SPEED_SMOOTH_WINDOW):
     """
     Estimate ball speed (km/h) per frame from court-plane displacement.
@@ -24,6 +44,12 @@ def get_ball_speed(ball_track, homography_matrices, fps, window=config.BALL_SPEE
         ball_track: list of (x, y) ball pixel coordinates per frame
         homography_matrices: list of image->court homography matrices per frame
         fps: video frame rate
+        bounce_frames: iterable of frame indices where the ball bounces. The
+            speed window baseline never reaches past a bounce into the
+            previous shot - otherwise the straight-line (chord) distance
+            between a pre-bounce and post-bounce point undershoots the
+            ball's actual (bent) path, understating speed right around the
+            bounce/hit.
         window: max frame gap used as the speed baseline
         max_speed_kmh: outlier guard, speeds above this are dropped
         smooth_window: rolling median window applied to reduce jitter
@@ -33,11 +59,12 @@ def get_ball_speed(ball_track, homography_matrices, fps, window=config.BALL_SPEE
     n = len(ball_track)
     raw_speeds = [None] * n
     recent = deque()
+    segment_start = _segment_start_per_frame(n, bounce_frames)
 
     for i in range(n):
         if ball_track[i][0] is None or homography_matrices[i] is None:
             continue
-        while recent and i - recent[0] > window:
+        while recent and (i - recent[0] > window or recent[0] < segment_start[i]):
             recent.popleft()
         if recent:
             j = recent[0]
