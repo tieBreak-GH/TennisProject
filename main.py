@@ -8,7 +8,7 @@ from person_detector import PersonDetector
 from ball_detector import BallDetector
 from speed_estimator import get_ball_speed, get_shot_max_speed
 from rally_analyzer import analyze_rallies, select_highlights
-from utils import scene_detect, ThreadedFrameReader, ThreadedFrameWriter
+from utils import SceneCutDetector, ThreadedFrameReader, ThreadedFrameWriter
 import argparse
 import time
 import torch
@@ -148,13 +148,19 @@ def _open_writer(path, fps, width, height):
     return cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*'avc1'), fps, (width, height))
 
 
-def analyze_streaming(path_input_video, scenes, ball_detector, court_detector, person_detector,
+def analyze_streaming(path_input_video, ball_detector, court_detector, person_detector,
                        detect_persons, ball_batch_size, person_batch_size, report):
     """
     Pass 1 of the streaming pipeline: decode the video once, frame by frame,
-    driving ball/court/person detection inline, and keep only their
-    lightweight per-frame metadata (never the whole video's pixels at once).
-    Peak memory is bounded by a small batch window instead of video length.
+    driving ball/court/person/scene-cut detection inline, and keep only
+    their lightweight per-frame metadata (never the whole video's pixels at
+    once). Peak memory is bounded by a small batch window instead of video
+    length.
+
+    Scene cuts (SceneCutDetector) are detected on the fly from this same
+    decode instead of PySceneDetect's own separate full-video pass, so the
+    video is decoded twice overall (this pass + render_streaming's) instead
+    of three times.
 
     Court homography reproduces court_detector.infer_model's exact
     broadcast-per-scene semantics: it probes up to config.COURT_MAX_PROBE_FRAMES
@@ -170,7 +176,7 @@ def analyze_streaming(path_input_video, scenes, ball_detector, court_detector, p
     decoding frame i+1 overlaps with running the ball/court/person models on
     frame i, instead of the two taking turns.
     :return
-        (ball_track, homography_matrices, kps_court, persons_top, persons_bottom, fps, num_frames)
+        (ball_track, homography_matrices, kps_court, persons_top, persons_bottom, fps, num_frames, scenes)
     """
     reader = ThreadedFrameReader(path_input_video)
     fps = reader.fps
@@ -189,8 +195,9 @@ def analyze_streaming(path_input_video, scenes, ball_detector, court_detector, p
     persons_top = []
     persons_bottom = []
 
-    scene_ptr = 0
-    scene_start, scene_end = scenes[0]
+    scene_cut_detector = SceneCutDetector()
+    scenes = []
+    scene_start = 0
     scene_matrix, scene_points, scene_probe_count = None, None, 0
     scene_pending = []
     person_pending = []
@@ -200,7 +207,7 @@ def analyze_streaming(path_input_video, scenes, ball_detector, court_detector, p
             return
         results = person_detector.detect_batch([f for _, f in pending])
         for (idx, frame), (bboxes, probs) in zip(pending, results):
-            top, bottom = person_detector.filter_top_bottom(frame, matrix, bboxes, probs, filter_players=False)
+            top, bottom = person_detector.filter_top_bottom(frame, matrix, bboxes, probs)
             persons_top[idx] = top
             persons_bottom[idx] = bottom
 
@@ -239,12 +246,13 @@ def analyze_streaming(path_input_video, scenes, ball_detector, court_detector, p
             if len(ball_window) >= ball_batch_size + 2:
                 flush_ball()
 
-            # scene boundary: resolve any still-pending probe backlog before moving on
-            if i == scene_end and scene_ptr + 1 < len(scenes):
+            # scene boundary: a detected cut closes the current scene here and
+            # opens a new one, instead of walking a precomputed scene list
+            if scene_cut_detector.is_cut(i, frame):
                 if scene_pending:
                     resolve_scene()
-                scene_ptr += 1
-                scene_start, scene_end = scenes[scene_ptr]
+                scenes.append((scene_start, i))
+                scene_start = i
                 scene_matrix, scene_points, scene_probe_count = None, None, 0
 
             # court + person
@@ -254,7 +262,7 @@ def analyze_streaming(path_input_video, scenes, ball_detector, court_detector, p
                 scene_pending.append((i, frame))
                 if m is not None:
                     scene_matrix, scene_points = m, p
-                if scene_matrix is not None or scene_probe_count >= config.COURT_MAX_PROBE_FRAMES or i == scene_end - 1:
+                if scene_matrix is not None or scene_probe_count >= config.COURT_MAX_PROBE_FRAMES:
                     resolve_scene()
             else:
                 homography_matrices[i] = scene_matrix
@@ -266,7 +274,7 @@ def analyze_streaming(path_input_video, scenes, ball_detector, court_detector, p
                         person_pending = []
 
             if i % 20 == 0:
-                report('video analiz ediliyor', min(0.05 + 0.65 * (i / frame_count_hint), 0.70))
+                report('video analiz ediliyor', min(0.02 + 0.68 * (i / frame_count_hint), 0.70))
 
             i += 1
 
@@ -275,10 +283,11 @@ def analyze_streaming(path_input_video, scenes, ball_detector, court_detector, p
             flush_person(person_pending, scene_matrix)
         if scene_pending:
             resolve_scene()
+        scenes.append((scene_start, i))
     finally:
         reader.close()
 
-    return ball_track, homography_matrices, kps_court, persons_top, persons_bottom, fps, i
+    return ball_track, homography_matrices, kps_court, persons_top, persons_bottom, fps, i, scenes
 
 
 def render_streaming(path_input_video, path_output_video, scenes, bounces, ball_track, homography_matrices,
@@ -491,16 +500,13 @@ def process_video(path_ball_track_model, path_court_model, path_bounce_model,
         ball_court_device = device
         person_device = device
 
-    report('sahne tespiti', 0.02)
-    scenes = scene_detect(path_input_video)
-
     ball_detector = BallDetector(path_ball_track_model, ball_court_device)
     court_detector = CourtDetectorNet(path_court_model, ball_court_device)
     person_detector = PersonDetector(person_device) if detect_persons else None
 
-    report('video analiz ediliyor ({})'.format(ball_court_device), 0.05)
-    ball_track, homography_matrices, kps_court, persons_top, persons_bottom, fps, num_frames = analyze_streaming(
-        path_input_video, scenes, ball_detector, court_detector, person_detector, detect_persons,
+    report('video analiz ediliyor ({})'.format(ball_court_device), 0.02)
+    ball_track, homography_matrices, kps_court, persons_top, persons_bottom, fps, num_frames, scenes = analyze_streaming(
+        path_input_video, ball_detector, court_detector, person_detector, detect_persons,
         _infer_batch_size(ball_court_device, config.BALL_INFER_BATCH_SIZE),
         _infer_batch_size(person_device, config.PERSON_INFER_BATCH_SIZE),
         report)

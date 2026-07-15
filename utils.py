@@ -2,23 +2,54 @@ import queue
 import threading
 
 import cv2
-from scenedetect import open_video, SceneManager
-from scenedetect.detectors import ContentDetector
+import numpy as np
 
-def scene_detect(path_video):
-    """
-    Split video to disjoint fragments based on color histograms
-    """
-    video = open_video(path_video)
-    scene_manager = SceneManager()
-    scene_manager.add_detector(ContentDetector())
-    scene_manager.detect_scenes(video=video)
-    scene_list = scene_manager.get_scene_list()
+import config
 
-    if scene_list == []:
-        scene_list = [(video.base_timecode, video.duration)]
-    scenes = [[x[0].frame_num, x[1].frame_num]for x in scene_list]
-    return scenes
+
+def _mean_pixel_distance(a, b):
+    """Mean absolute per-pixel difference between two same-shape 2D arrays."""
+    return np.abs(a.astype(np.int32) - b.astype(np.int32)).mean()
+
+
+class SceneCutDetector:
+    """
+    Online, per-frame reimplementation of PySceneDetect's ContentDetector
+    default behavior (equal-weighted HSV hue/saturation/luma mean pixel
+    distance between consecutive frames, no edge component) - runs inline as
+    frames are decoded elsewhere instead of PySceneDetect's own separate
+    full-video decode pass.
+
+    Approximation vs PySceneDetect: a cut is confirmed as soon as the score
+    clears the threshold and min_scene_len frames have passed since the last
+    cut, rather than PySceneDetect's default flash-merge filter (which can
+    delay confirming a cut by several frames to merge nearby ones). Good
+    enough for resetting per-scene court homography probing; not intended as
+    a numeric match.
+    """
+
+    def __init__(self, threshold=config.SCENE_CUT_THRESHOLD, min_scene_len=config.SCENE_CUT_MIN_LEN):
+        self._threshold = threshold
+        self._min_scene_len = min_scene_len
+        self._last_hsv = None
+        self._last_cut = 0
+
+    def is_cut(self, frame_num, frame):
+        hue, sat, lum = cv2.split(cv2.cvtColor(frame, cv2.COLOR_BGR2HSV))
+        if self._last_hsv is None:
+            self._last_hsv = (hue, sat, lum)
+            return False
+
+        prev_hue, prev_sat, prev_lum = self._last_hsv
+        score = (_mean_pixel_distance(hue, prev_hue)
+                 + _mean_pixel_distance(sat, prev_sat)
+                 + _mean_pixel_distance(lum, prev_lum)) / 3
+        self._last_hsv = (hue, sat, lum)
+
+        if score >= self._threshold and frame_num - self._last_cut >= self._min_scene_len:
+            self._last_cut = frame_num
+            return True
+        return False
 
 
 class ThreadedFrameReader:

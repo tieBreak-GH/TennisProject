@@ -51,6 +51,12 @@ LINE_CALL_MARGIN_CM = 20        # "too close to call" buffer around a serve's
                                  # for homography + bounce-frame detection
                                  # error, not real line width
 
+# -- Scene cut detection (utils.SceneCutDetector) --
+# Matches PySceneDetect's ContentDetector defaults (equal-weighted HSV
+# hue/saturation/luma mean pixel distance, no edge component).
+SCENE_CUT_THRESHOLD = 27.0  # min average HSV pixel distance to flag a cut
+SCENE_CUT_MIN_LEN = 15      # min frames between two cuts
+
 # -- Court keypoint detection (court_detection_net.py) --
 COURT_MAX_PROBE_FRAMES = 5       # frames tried per scene before giving up
 COURT_HEATMAP_THRESHOLD = 170    # binarize the per-keypoint heatmap
