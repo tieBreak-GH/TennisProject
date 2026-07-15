@@ -1,8 +1,10 @@
 import cv2
+import numpy as np
 from ultralytics import YOLO
 from court_reference import CourtReference
 
 import config
+
 
 class PersonDetector():
     def __init__(self, device='cpu'):
