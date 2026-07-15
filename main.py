@@ -8,7 +8,7 @@ from person_detector import PersonDetector
 from ball_detector import BallDetector
 from speed_estimator import get_ball_speed, get_shot_max_speed
 from rally_analyzer import analyze_rallies, select_highlights
-from utils import scene_detect
+from utils import scene_detect, ThreadedFrameReader, ThreadedFrameWriter
 import argparse
 import time
 import torch
@@ -165,12 +165,16 @@ def analyze_streaming(path_input_video, scenes, ball_detector, court_detector, p
     frames is deferred until the scene's homography resolves, then run
     batched on the backlog; frames afterward reuse the resolved homography
     immediately.
+
+    Frame decode happens on a background thread (ThreadedFrameReader) so
+    decoding frame i+1 overlaps with running the ball/court/person models on
+    frame i, instead of the two taking turns.
     :return
         (ball_track, homography_matrices, kps_court, persons_top, persons_bottom, fps, num_frames)
     """
-    cap = cv2.VideoCapture(path_input_video)
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    frame_count_hint = max(cap.get(cv2.CAP_PROP_FRAME_COUNT), 1)
+    reader = ThreadedFrameReader(path_input_video)
+    fps = reader.fps
+    frame_count_hint = reader.frame_count_hint
 
     ball_track = [(None, None), (None, None)]
     ball_window = []
@@ -216,66 +220,64 @@ def analyze_streaming(path_input_video, scenes, ball_detector, court_detector, p
         ball_window = [] if final else ball_window[-2:]
 
     i = 0
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
+    try:
+        for frame in reader:
+            if ball_scale_x is None:
+                orig_height, orig_width = frame.shape[:2]
+                ball_scale_x = orig_width / ball_detector.width
+                ball_scale_y = orig_height / ball_detector.height
+                court_scale_x = orig_width / court_width
+                court_scale_y = orig_height / court_height
 
-        if ball_scale_x is None:
-            orig_height, orig_width = frame.shape[:2]
-            ball_scale_x = orig_width / ball_detector.width
-            ball_scale_y = orig_height / ball_detector.height
-            court_scale_x = orig_width / court_width
-            court_scale_y = orig_height / court_height
+            homography_matrices.append(None)
+            kps_court.append(None)
+            persons_top.append([])
+            persons_bottom.append([])
 
-        homography_matrices.append(None)
-        kps_court.append(None)
-        persons_top.append([])
-        persons_bottom.append([])
+            # ball: continuous sliding window, independent of scene boundaries
+            ball_window.append(cv2.resize(frame, (ball_detector.width, ball_detector.height)))
+            if len(ball_window) >= ball_batch_size + 2:
+                flush_ball()
 
-        # ball: continuous sliding window, independent of scene boundaries
-        ball_window.append(cv2.resize(frame, (ball_detector.width, ball_detector.height)))
-        if len(ball_window) >= ball_batch_size + 2:
-            flush_ball()
+            # scene boundary: resolve any still-pending probe backlog before moving on
+            if i == scene_end and scene_ptr + 1 < len(scenes):
+                if scene_pending:
+                    resolve_scene()
+                scene_ptr += 1
+                scene_start, scene_end = scenes[scene_ptr]
+                scene_matrix, scene_points, scene_probe_count = None, None, 0
 
-        # scene boundary: resolve any still-pending probe backlog before moving on
-        if i == scene_end and scene_ptr + 1 < len(scenes):
-            if scene_pending:
-                resolve_scene()
-            scene_ptr += 1
-            scene_start, scene_end = scenes[scene_ptr]
-            scene_matrix, scene_points, scene_probe_count = None, None, 0
+            # court + person
+            if scene_matrix is None and scene_probe_count < config.COURT_MAX_PROBE_FRAMES:
+                m, p = court_detector.infer_frame(frame, court_scale_x, court_scale_y)
+                scene_probe_count += 1
+                scene_pending.append((i, frame))
+                if m is not None:
+                    scene_matrix, scene_points = m, p
+                if scene_matrix is not None or scene_probe_count >= config.COURT_MAX_PROBE_FRAMES or i == scene_end - 1:
+                    resolve_scene()
+            else:
+                homography_matrices[i] = scene_matrix
+                kps_court[i] = scene_points
+                if detect_persons and scene_matrix is not None:
+                    person_pending.append((i, frame))
+                    if len(person_pending) >= person_batch_size:
+                        flush_person(person_pending, scene_matrix)
+                        person_pending = []
 
-        # court + person
-        if scene_matrix is None and scene_probe_count < config.COURT_MAX_PROBE_FRAMES:
-            m, p = court_detector.infer_frame(frame, court_scale_x, court_scale_y)
-            scene_probe_count += 1
-            scene_pending.append((i, frame))
-            if m is not None:
-                scene_matrix, scene_points = m, p
-            if scene_matrix is not None or scene_probe_count >= config.COURT_MAX_PROBE_FRAMES or i == scene_end - 1:
-                resolve_scene()
-        else:
-            homography_matrices[i] = scene_matrix
-            kps_court[i] = scene_points
-            if detect_persons and scene_matrix is not None:
-                person_pending.append((i, frame))
-                if len(person_pending) >= person_batch_size:
-                    flush_person(person_pending, scene_matrix)
-                    person_pending = []
+            if i % 20 == 0:
+                report('video analiz ediliyor', min(0.05 + 0.65 * (i / frame_count_hint), 0.70))
 
-        if i % 20 == 0:
-            report('video analiz ediliyor', min(0.05 + 0.65 * (i / frame_count_hint), 0.70))
+            i += 1
 
-        i += 1
+        flush_ball(final=True)
+        if person_pending:
+            flush_person(person_pending, scene_matrix)
+        if scene_pending:
+            resolve_scene()
+    finally:
+        reader.close()
 
-    flush_ball(final=True)
-    if person_pending:
-        flush_person(person_pending, scene_matrix)
-    if scene_pending:
-        resolve_scene()
-
-    cap.release()
     return ball_track, homography_matrices, kps_court, persons_top, persons_bottom, fps, i
 
 
@@ -289,6 +291,12 @@ def render_streaming(path_input_video, path_output_video, scenes, bounces, ball_
     the output VideoWriter (and any rallies-only/highlight writer whose
     window it falls in), discarding it immediately - no second full-length
     frame list, no third decode for highlight/rallies-only clips.
+
+    Decode (ThreadedFrameReader) and the main output write (ThreadedFrameWriter)
+    each run on their own background thread, so decode/render/encode overlap
+    instead of taking turns on one thread. The rallies-only/highlight writers
+    stay synchronous - they're opened/closed dynamically as rally windows are
+    entered and left, and write far less often than the main output.
     :return
         (rallies_only_video, highlight_clips) - same shape as the old
         write_rallies_only/write_highlights return values
@@ -308,7 +316,7 @@ def render_streaming(path_input_video, path_output_video, scenes, bounces, ball_
     out_path_rallies_only = rallies_only_path or os.path.join(
         os.path.dirname(os.path.abspath(path_output_video)), 'rallies_only.mp4')
 
-    cap = cv2.VideoCapture(path_input_video)
+    reader = ThreadedFrameReader(path_input_video)
     main_writer = None
     rallies_writer = None
     highlight_writer = None
@@ -322,77 +330,75 @@ def render_streaming(path_input_video, path_output_video, scenes, bounces, ball_
     court_img = get_court_img() if scene_drawable[0] else None
 
     i = 0
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
+    try:
+        for frame in reader:
+            if main_writer is None:
+                height, width = frame.shape[:2]
+                main_writer = ThreadedFrameWriter(_open_writer(path_output_video, fps, width, height))
 
-        if main_writer is None:
-            height, width = frame.shape[:2]
-            main_writer = _open_writer(path_output_video, fps, width, height)
+            if i == scene_end and scene_ptr + 1 < len(scenes):
+                scene_ptr += 1
+                scene_start, scene_end = scenes[scene_ptr]
+                court_img = get_court_img() if scene_drawable[scene_ptr] else None
 
-        if i == scene_end and scene_ptr + 1 < len(scenes):
-            scene_ptr += 1
-            scene_start, scene_end = scenes[scene_ptr]
-            court_img = get_court_img() if scene_drawable[scene_ptr] else None
+            if scene_drawable[scene_ptr]:
+                img_res = frame.copy()
+                img_res, court_img = render_frame(img_res, i, bounces, ball_track, homography_matrices, kps_court,
+                                                   persons_top, persons_bottom, ball_speed, shot_max_speed,
+                                                   serve_labels, court_img, draw_trace, trace)
+            else:
+                img_res = frame
 
-        if scene_drawable[scene_ptr]:
-            img_res = frame.copy()
-            img_res, court_img = render_frame(img_res, i, bounces, ball_track, homography_matrices, kps_court,
-                                               persons_top, persons_bottom, ball_speed, shot_max_speed,
-                                               serve_labels, court_img, draw_trace, trace)
-        else:
-            img_res = frame
+            main_writer.write(img_res)
 
-        main_writer.write(img_res)
+            if trim_dead_time:
+                while rally_ptr < len(rallies) and i >= rallies[rally_ptr]['end_frame']:
+                    rally_ptr += 1
+                if rally_ptr < len(rallies) and rallies[rally_ptr]['start_frame'] <= i < rallies[rally_ptr]['end_frame']:
+                    if rallies_writer is None:
+                        os.makedirs(os.path.dirname(os.path.abspath(out_path_rallies_only)), exist_ok=True)
+                        rallies_writer = _open_writer(out_path_rallies_only, fps, width, height)
+                    rallies_writer.write(img_res)
 
-        if trim_dead_time:
-            while rally_ptr < len(rallies) and i >= rallies[rally_ptr]['end_frame']:
-                rally_ptr += 1
-            if rally_ptr < len(rallies) and rallies[rally_ptr]['start_frame'] <= i < rallies[rally_ptr]['end_frame']:
-                if rallies_writer is None:
-                    os.makedirs(os.path.dirname(os.path.abspath(out_path_rallies_only)), exist_ok=True)
-                    rallies_writer = _open_writer(out_path_rallies_only, fps, width, height)
-                rallies_writer.write(img_res)
+            if generate_highlights:
+                if highlight_ptr < len(highlights) and i >= highlights[highlight_ptr]['rally']['end_frame']:
+                    if highlight_writer is not None:
+                        highlight_writer.release()
+                        highlight_clips.append(highlight_writer_info)
+                        highlight_writer = None
+                    highlight_ptr += 1
+                if highlight_ptr < len(highlights):
+                    h = highlights[highlight_ptr]
+                    r = h['rally']
+                    if r['start_frame'] <= i < r['end_frame']:
+                        if highlight_writer is None:
+                            os.makedirs(out_dir_highlights, exist_ok=True)
+                            reason_tag = '_'.join(h['reasons'])
+                            path = os.path.join(out_dir_highlights,
+                                                 'highlight_rally{:02d}_{}.mp4'.format(r['rally_no'], reason_tag))
+                            highlight_writer = _open_writer(path, fps, width, height)
+                            highlight_writer_info = {'rally_no': r['rally_no'], 'reasons': h['reasons'], 'path': path}
+                        highlight_writer.write(img_res)
 
-        if generate_highlights:
-            if highlight_ptr < len(highlights) and i >= highlights[highlight_ptr]['rally']['end_frame']:
-                if highlight_writer is not None:
-                    highlight_writer.release()
-                    highlight_clips.append(highlight_writer_info)
-                    highlight_writer = None
-                highlight_ptr += 1
-            if highlight_ptr < len(highlights):
-                h = highlights[highlight_ptr]
-                r = h['rally']
-                if r['start_frame'] <= i < r['end_frame']:
-                    if highlight_writer is None:
-                        os.makedirs(out_dir_highlights, exist_ok=True)
-                        reason_tag = '_'.join(h['reasons'])
-                        path = os.path.join(out_dir_highlights,
-                                             'highlight_rally{:02d}_{}.mp4'.format(r['rally_no'], reason_tag))
-                        highlight_writer = _open_writer(path, fps, width, height)
-                        highlight_writer_info = {'rally_no': r['rally_no'], 'reasons': h['reasons'], 'path': path}
-                    highlight_writer.write(img_res)
+            if i % 20 == 0:
+                report('video oluşturuluyor ve yazılıyor', 0.75 + 0.23 * (i / max(num_frames, 1)))
 
-        if i % 20 == 0:
-            report('video oluşturuluyor ve yazılıyor', 0.75 + 0.23 * (i / max(num_frames, 1)))
+            i += 1
 
-        i += 1
+        if highlight_writer is not None:
+            highlight_writer.release()
+            highlight_clips.append(highlight_writer_info)
+            highlight_writer = None
+    finally:
+        reader.close()
+        if main_writer is not None:
+            main_writer.release()
+        if rallies_writer is not None:
+            rallies_writer.release()
+        if highlight_writer is not None:
+            highlight_writer.release()
 
-    if highlight_writer is not None:
-        highlight_writer.release()
-        highlight_clips.append(highlight_writer_info)
-
-    cap.release()
-    if main_writer is not None:
-        main_writer.release()
-
-    rallies_only_video = None
-    if rallies_writer is not None:
-        rallies_writer.release()
-        rallies_only_video = out_path_rallies_only
-
+    rallies_only_video = out_path_rallies_only if rallies_writer is not None else None
     return rallies_only_video, highlight_clips
 
 
