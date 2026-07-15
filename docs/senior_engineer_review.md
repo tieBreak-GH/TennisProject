@@ -43,8 +43,7 @@ Bu rapor, `TennisProject` (Tenis Analiz Sistemi) kod tabanını kıdemli bir yaz
 * **Çözüm Önerisi:** Hız hesabı yapılırken sekme (bounce) çerçeveleri birer sınır olarak kabul edilmeli ve hız penceresi sekme noktalarını aşmamalıdır (yani hız hesabı her sekme segmenti içinde sınırlandırılmalıdır).
 
 ### 2.2. Servis Kararı ve Çizgi Kontrolü (`rally_analyzer.py`)
-* **Sınırlandırma (Doubles/Çiftler Maçı Uyumsuzluğu):** `filter_players` fonksiyonu, sahadaki oyuncuları süzmek için top/orta servis çizgisine (`middle_line`) en yakın tek bir üst ve tek bir alt oyuncuyu seçer.
-  * Bu mantık tekler (singles) maçı için mükemmel çalışsa da, **çiftler (doubles) maçlarında sahadaki diğer iki oyuncuyu sessizce eler** ve analizi bozar.
+* **`filter_players` — Ölü Kod, Aktif Bir Sorun Değil (Düzeltme):** İlk incelemede `person_detector.filter_players` fonksiyonunun sahadaki oyuncuları en yakın tek bir üst ve tek bir alt oyuncuya indirgeyerek çiftler (doubles) maçlarını bozduğu düşünülmüştü. Kod daha yakından incelendiğinde bu fonksiyonun **gerçek pipeline'da hiç çağrılmadığı** görüldü: `filter_top_bottom`, `detect_top_and_bottom_players` ve `track_players` fonksiyonlarının hepsinde `filter_players` parametresinin varsayılanı `False`'tur ve pipeline'ın kullandığı tek çağrı noktası (`main.py`, `analyze_streaming` içindeki `flush_person`) bunu açıkça `filter_players=False` olarak geçer. Repo genelinde `filter_players=True` geçen hiçbir çağrı yoktur. Ayrıca üst/alt yarı saha maskesi (`court_reference.get_court_mask(1)/(2)`) yalnızca file net'in y-koordinatına göre kesim yapar, x eksenini (doubles koridorunu) hiç kısıtlamaz. Sonuç olarak mevcut varsayılan davranışta sahadaki 4 oyuncu da tespit edilip render edilir; doubles maçlarını bozan aktif bir mekanizma yoktur. `filter_players` fonksiyonu şu an kullanılmayan kod olarak duruyor — ileride biri `filter_players=True` ile çağırırsa bu risk geri döner, bu yüzden fonksiyonun temizlenmesi veya en azından "kullanılmıyor" şeklinde belgelenmesi önerilir.
 * **Çizgi Kararı Sınırları:** Servis çizgi kararı (`line_call`) sadece servis vuruşlarıyla sınırlandırılmıştır ve bu doğru bir yaklaşımdır (genel ralli çizgi kararları için homografi hassasiyeti yetersizdir).
   * Ancak, homografi matrisinin kamera açısına ve kalibrasyon kalitesine bağlı olarak hata payı (`LINE_CALL_MARGIN_CM = 20`) çok kritiktir. 20 cm tenis için çok geniş bir "belirsiz" (uncertain) alan demektir. Bu durum kullanıcıya net şekilde açıklanmalıdır.
 
@@ -82,7 +81,7 @@ Aşağıdaki tablo, projenin senior seviyesinde bir ürüne dönüşmesi için y
 | **4** | **Bounce Sınırında Hız Kontrolü** | Mantık | Orta | Yüksek | Sekme/vuruş anlarında top hızının yapay olarak düşmesini önlemek. |
 | **5** | **Producer-Consumer Pipeline** | Teknik | Zor | Yüksek | Video okuma, model çalıştırma ve yazma işlerini paralelleştirerek ~%30 hızlanma. |
 | **6** | **Sahne Algılamayı Pass 1'e Gömme** | Teknik | Zor | Orta | PySceneDetect'in bağımsız video decode geçişini kaldırıp 3 decode'u 2'ye düşürmek. |
-| **7** | **Çiftler (Doubles) Desteği** | Mantık | Orta | Düşük | `filter_players` mantığını genişleterek korttaki 4 oyuncuyu da takip edebilmek. |
+| **7** | **Ölü `filter_players` Kodunu Temizleme** | Mantık | Kolay | Düşük | `filter_players` zaten hiçbir çağrı noktasında `True` geçilmiyor (dead code); doubles zaten 4 oyuncuyu da takip ediyor. Fonksiyonu kaldırmak veya "kullanılmıyor" diye belgelemek yeterli. |
 
 ---
 
