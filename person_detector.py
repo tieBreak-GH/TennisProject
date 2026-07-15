@@ -21,32 +21,33 @@ class PersonDetector():
         self.counter_bottom = 0
 
 
-    def detect(self, image, person_min_score=config.PERSON_MIN_SCORE):
+    def detect_batch(self, images, person_min_score=config.PERSON_MIN_SCORE):
+        """ Run YOLO on a list of images in one predict() call - batching the
+        forward pass is what actually benefits from GPU parallelism; the
+        per-frame court-mask filtering below stays a cheap CPU loop.
+        :return
+            list of (persons_boxes, probs), one entry per input image, in order
+        """
         PERSON_CLASS = 0  # COCO "person" class
-        results = self.detection_model.predict(image, classes=[PERSON_CLASS], conf=person_min_score,
-                                                device=self.device, verbose=False)[0]
+        results_list = self.detection_model.predict(images, classes=[PERSON_CLASS], conf=person_min_score,
+                                                      device=self.device, verbose=False)
+        return [([box.cpu().numpy() for box in results.boxes.xyxy],
+                 [float(score) for score in results.boxes.conf])
+                for results in results_list]
 
-        persons_boxes = [box.cpu().numpy() for box in results.boxes.xyxy]
-        probs = [float(score) for score in results.boxes.conf]
-        return persons_boxes, probs
-    
-    def detect_top_and_bottom_players(self, image, inv_matrix, filter_players=False):
+    def detect(self, image, person_min_score=config.PERSON_MIN_SCORE):
+        return self.detect_batch([image], person_min_score)[0]
+
+    def _filter_top_bottom(self, image, inv_matrix, bboxes, probs, filter_players=False):
         matrix = cv2.invert(inv_matrix)[1]
         mask_top_court = cv2.warpPerspective(self.ref_top_court, matrix, image.shape[1::-1])
         mask_bottom_court = cv2.warpPerspective(self.ref_bottom_court, matrix, image.shape[1::-1])
         person_bboxes_top, person_bboxes_bottom = [], []
 
-        # YOLO's confidence calibration runs much lower than the old Faster
-        # R-CNN's for small/distant players (measured as low as ~0.44 for the
-        # far player in a real broadcast frame, vs Faster R-CNN's usual >0.9)
-        # - the top/bottom court-mask filter below does the real work of
-        # rejecting non-players (ball kids, officials, crowd), so this can
-        # stay low without letting false positives through.
-        bboxes, probs = self.detect(image, person_min_score=config.PERSON_MIN_SCORE)
         if len(bboxes) > 0:
             person_points = [[int((bbox[2] + bbox[0]) / 2), int(bbox[3])] for bbox in bboxes]
             person_bboxes = list(zip(bboxes, person_points))
-  
+
             person_bboxes_top = [pt for pt in person_bboxes if mask_top_court[pt[1][1]-1, pt[1][0]] == 1]
             person_bboxes_bottom = [pt for pt in person_bboxes if mask_bottom_court[pt[1][1] - 1, pt[1][0]] == 1]
 
@@ -54,6 +55,16 @@ class PersonDetector():
                 person_bboxes_top, person_bboxes_bottom = self.filter_players(person_bboxes_top, person_bboxes_bottom,
                                                                               matrix)
         return person_bboxes_top, person_bboxes_bottom
+
+    def detect_top_and_bottom_players(self, image, inv_matrix, filter_players=False):
+        # YOLO's confidence calibration runs much lower than the old Faster
+        # R-CNN's for small/distant players (measured as low as ~0.44 for the
+        # far player in a real broadcast frame, vs Faster R-CNN's usual >0.9)
+        # - the top/bottom court-mask filter below does the real work of
+        # rejecting non-players (ball kids, officials, crowd), so this can
+        # stay low without letting false positives through.
+        bboxes, probs = self.detect(image, person_min_score=config.PERSON_MIN_SCORE)
+        return self._filter_top_bottom(image, inv_matrix, bboxes, probs, filter_players)
 
     def filter_players(self, person_bboxes_top, person_bboxes_bottom, matrix):
         """
@@ -73,19 +84,24 @@ class PersonDetector():
             person_bboxes_bottom = [person_bboxes_bottom[ind]]
         return person_bboxes_top, person_bboxes_bottom
     
-    def track_players(self, frames, matrix_all, filter_players=False):
-        persons_top = []
-        persons_bottom = []
+    def track_players(self, frames, matrix_all, filter_players=False, batch_size=config.PERSON_INFER_BATCH_SIZE):
         min_len = min(len(frames), len(matrix_all))
-        for num_frame in tqdm(range(min_len)):
-            img = frames[num_frame]
-            if matrix_all[num_frame] is not None:
-                inv_matrix = matrix_all[num_frame]
-                person_top, person_bottom = self.detect_top_and_bottom_players(img, inv_matrix, filter_players)
-            else:
-                person_top, person_bottom = [], []
-            persons_top.append(person_top)
-            persons_bottom.append(person_bottom)
-        return persons_top, persons_bottom    
+        persons_top = [[] for _ in range(min_len)]
+        persons_bottom = [[] for _ in range(min_len)]
+
+        # frames without a homography have no meaningful court mask to filter
+        # against, so they're skipped entirely (same as the original per-frame
+        # loop, which never called detect() for them)
+        valid_indices = [i for i in range(min_len) if matrix_all[i] is not None]
+
+        for batch_start in tqdm(range(0, len(valid_indices), batch_size)):
+            batch_indices = valid_indices[batch_start:batch_start + batch_size]
+            batch_results = self.detect_batch([frames[i] for i in batch_indices])
+            for idx, (bboxes, probs) in zip(batch_indices, batch_results):
+                person_top, person_bottom = self._filter_top_bottom(frames[idx], matrix_all[idx], bboxes, probs,
+                                                                      filter_players)
+                persons_top[idx] = person_top
+                persons_bottom[idx] = person_bottom
+        return persons_top, persons_bottom
 
 

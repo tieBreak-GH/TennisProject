@@ -13,6 +13,8 @@ import argparse
 import time
 import torch
 
+import config
+
 def read_video(path_video):
     cap = cv2.VideoCapture(path_video)
     # Keep fps as a float: truncating e.g. 29.97 to 29 drifts audio/timestamp
@@ -259,6 +261,20 @@ def _select_device(prefer_alt_gpu=True):
     return 'cpu'
 
 
+def _infer_batch_size(device, gpu_batch_size):
+    """
+    Batching frames into one model forward pass only pays off when per-call
+    kernel-launch overhead dominates, which is the well-established case on
+    CUDA. Measured on this dev machine (Apple Silicon, no CUDA): batch_size=16
+    was ~4x SLOWER than sequential on CPU, and slower than plain CPU
+    sequential on MPS too (both backends apparently lack the kernel-launch
+    overhead that batching is meant to amortize, or don't parallelize this
+    model's ops well across a batch dim). So default to sequential
+    (batch_size=1, the original per-frame behavior) everywhere except CUDA.
+    """
+    return gpu_batch_size if str(device) == 'cuda' else 1
+
+
 def process_video(path_ball_track_model, path_court_model, path_bounce_model,
                    path_input_video, path_output_video, draw_trace=True, device=None,
                    detect_persons=True, progress_callback=None,
@@ -316,7 +332,7 @@ def process_video(path_ball_track_model, path_court_model, path_bounce_model,
 
     report('ball detection ({})'.format(ball_court_device), 0.05)
     ball_detector = BallDetector(path_ball_track_model, ball_court_device)
-    ball_track = ball_detector.infer_model(frames)
+    ball_track = ball_detector.infer_model(frames, batch_size=_infer_batch_size(ball_court_device, config.BALL_INFER_BATCH_SIZE))
 
     report('court detection ({})'.format(ball_court_device), 0.55)
     court_detector = CourtDetectorNet(path_court_model, ball_court_device)
@@ -325,7 +341,9 @@ def process_video(path_ball_track_model, path_court_model, path_bounce_model,
     if detect_persons:
         report('person detection ({})'.format(person_device), 0.65)
         person_detector = PersonDetector(person_device)
-        persons_top, persons_bottom = person_detector.track_players(frames, homography_matrices, filter_players=False)
+        persons_top, persons_bottom = person_detector.track_players(
+            frames, homography_matrices, filter_players=False,
+            batch_size=_infer_batch_size(person_device, config.PERSON_INFER_BATCH_SIZE))
     else:
         persons_top = [[] for _ in frames]
         persons_bottom = [[] for _ in frames]

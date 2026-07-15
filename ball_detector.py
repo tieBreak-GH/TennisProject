@@ -18,10 +18,16 @@ class BallDetector:
         self.width = 640
         self.height = 360
 
-    def infer_model(self, frames):
+    def infer_model(self, frames, batch_size=config.BALL_INFER_BATCH_SIZE):
         """ Run pretrained model on a consecutive list of frames
         :params
             frames: list of consecutive video frames
+            batch_size: how many 3-frame windows to run through the model
+                forward pass at once. Postprocessing stays per-frame and
+                sequential (each frame's outlier filter depends on the
+                previous frame's prediction), so only the GPU-bound forward
+                pass is batched; results are unaffected by batch_size since
+                the model is in eval() mode (no batch-dependent layers).
         :return
             ball_track: list of detected ball points
         """
@@ -31,27 +37,27 @@ class BallDetector:
         scale_x = orig_width / self.width
         scale_y = orig_height / self.height
 
-        # each frame is resized once and reused as "prev"/"preprev" in the next
-        # two iterations, instead of being resized 3 times across the window
-        resized_preprev = cv2.resize(frames[0], (self.width, self.height))
-        resized_prev = cv2.resize(frames[1], (self.width, self.height))
+        resized = [cv2.resize(f, (self.width, self.height)) for f in frames]
 
-        for num in tqdm(range(2, len(frames))):
-            img = cv2.resize(frames[num], (self.width, self.height))
-            imgs = np.concatenate((img, resized_prev, resized_preprev), axis=2)
-            imgs = imgs.astype(np.float32)/255.0
-            imgs = np.rollaxis(imgs, 2, 0)
-            inp = np.expand_dims(imgs, axis=0)
+        num_windows = len(frames) - 2
+        for batch_start in tqdm(range(0, num_windows, batch_size)):
+            batch_end = min(batch_start + batch_size, num_windows)
+            batch_inputs = []
+            for num in range(batch_start + 2, batch_end + 2):
+                imgs = np.concatenate((resized[num], resized[num-1], resized[num-2]), axis=2)
+                imgs = imgs.astype(np.float32)/255.0
+                imgs = np.rollaxis(imgs, 2, 0)
+                batch_inputs.append(imgs)
+            inp = np.stack(batch_inputs, axis=0)
 
             with torch.no_grad():
                 out = self.model(torch.from_numpy(inp).float().to(self.device))
             output = out.argmax(dim=1).detach().cpu().numpy()
-            x_pred, y_pred = self.postprocess(output, prev_pred, scale_x, scale_y)
-            prev_pred = [x_pred, y_pred]
-            ball_track.append((x_pred, y_pred))
 
-            resized_preprev = resized_prev
-            resized_prev = img
+            for i in range(output.shape[0]):
+                x_pred, y_pred = self.postprocess(output[i:i+1], prev_pred, scale_x, scale_y)
+                prev_pred = [x_pred, y_pred]
+                ball_track.append((x_pred, y_pred))
         return ball_track
 
     def postprocess(self, feature_map, prev_pred, scale_x=2, scale_y=2, max_dist=config.BALL_MAX_JUMP_PX):

@@ -30,6 +30,11 @@ BALL_SPEED_SMOOTH_WINDOW = 5    # rolling median window to reduce jitter
 # -- Ball tracking (ball_detector.py) --
 BALL_MAX_JUMP_PX = 80  # postprocess: max distance from the previous ball
                         # detection to accept a new candidate as the same ball
+BALL_INFER_BATCH_SIZE = 16  # frames per model forward pass; postprocessing
+                             # stays per-frame (sequential prev_pred dependency)
+
+# -- Person detection batching (person_detector.py) --
+PERSON_INFER_BATCH_SIZE = 16  # frames per YOLO predict() call
 
 # -- Bounce detection (bounce_detector.py) --
 BOUNCE_SCORE_THRESHOLD = 0.45
