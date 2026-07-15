@@ -15,21 +15,6 @@ import torch
 
 import config
 
-def read_video(path_video):
-    cap = cv2.VideoCapture(path_video)
-    # Keep fps as a float: truncating e.g. 29.97 to 29 drifts audio/timestamp
-    # sync over long videos and skews the speed-chart time axis in app.py.
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    frames = []
-    while cap.isOpened():
-        ret, frame = cap.read()
-        if ret:
-            frames.append(frame)
-        else:
-            break    
-    cap.release()
-    return frames, fps
-
 def get_court_img():
     court_reference = CourtReference()
     court = court_reference.build_court_reference()
@@ -37,205 +22,371 @@ def get_court_img():
     court_img = (np.stack((court, court, court), axis=2)*255).astype(np.uint8)
     return court_img
 
-def render_output(frames, scenes, bounces, ball_track, homography_matrices, kps_court, persons_top, persons_bottom,
-                   ball_speed=None, shot_max_speed=None, serve_frames=None, draw_trace=False, trace=7):
+_MINIMAP_WIDTH = 166
+_MINIMAP_HEIGHT = 350
+
+
+def render_frame(img_res, i, bounces, ball_track, homography_matrices, kps_court, persons_top, persons_bottom,
+                  ball_speed, shot_max_speed, serve_frames, court_img, draw_trace, trace):
     """
+    Render one frame's overlays (ball trace/speed/serve label, court
+    keypoints, minimap with bounce marks + player dots, HUD). Extracted from
+    the old render_output's per-frame loop body so render_streaming can call
+    it once per decoded frame instead of building a second full-length list
+    of rendered frames.
     :params
-        frames: list of original images
-        scenes: list of beginning and ending of video fragment
-        bounces: list of image numbers where ball touches the ground
-        ball_track: list of (x,y) ball coordinates
-        homography_matrices: list of homography matrices
-        kps_court: list of 14 key points of tennis court
-        persons_top: list of person bboxes located in the top of tennis court
-        persons_bottom: list of person bboxes located in the bottom of tennis court
-        ball_speed: list of instantaneous ball speed (km/h) per frame, or None to
-            skip. Drawn next to the ball; changes every frame so it's hard to read
-            while the ball is moving fast, but useful when paused/stepping frames.
-        shot_max_speed: list of per-frame "current shot" peak speed (km/h, see
-            speed_estimator.get_shot_max_speed), or None to skip. Shown as a fixed,
-            stable HUD (readable while the ball is moving) alongside the ball_speed tag.
-        serve_frames: set of frame indices belonging to a shot labeled as a serve
-            (see rally_analyzer.analyze_rallies), or None to skip. Drawn next to
-            the ball for the whole serve shot's duration.
-        draw_trace: whether to draw ball trace
-        trace: the length of ball trace
+        img_res: a mutable working copy of the raw frame (caller's responsibility
+            to .copy() the decoded frame before calling)
+        court_img: minimap render state (accumulates bounce marks) - the caller
+            must carry this across frames within the same drawable scene and
+            reset it (via get_court_img()) whenever a new drawable scene begins
     :return
-        imgs_res: list of resulting images
+        (img_res, court_img): the rendered frame and the (possibly mutated) minimap state
     """
-    imgs_res = []
-    width_minimap = 166
-    height_minimap = 350
-    is_track = [x is not None for x in homography_matrices] 
-    for num_scene in range(len(scenes)):
-        sum_track = sum(is_track[scenes[num_scene][0]:scenes[num_scene][1]])
-        len_track = scenes[num_scene][1] - scenes[num_scene][0]
+    inv_mat = homography_matrices[i]
 
-        eps = 1e-15
-        scene_rate = sum_track/(len_track+eps)
-        if (scene_rate > 0.5):
-            court_img = get_court_img()
+    # draw ball trajectory
+    if ball_track[i][0] is not None:
+        if draw_trace:
+            for j in range(0, trace):
+                if i-j >= 0:
+                    if ball_track[i-j][0] is not None:
+                        draw_x = int(ball_track[i-j][0])
+                        draw_y = int(ball_track[i-j][1])
+                        img_res = cv2.circle(img_res, (draw_x, draw_y),
+                        radius=3, color=(0, 255, 0), thickness=2)
+        else:
+            img_res = cv2.circle(img_res , (int(ball_track[i][0]), int(ball_track[i][1])), radius=5,
+                                 color=(0, 255, 0), thickness=2)
+            img_res = cv2.putText(img_res, 'ball',
+                  org=(int(ball_track[i][0]) + 8, int(ball_track[i][1]) + 8),
+                  fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+                  fontScale=0.8,
+                  thickness=2,
+                  color=(0, 255, 0))
 
-            for i in range(scenes[num_scene][0], scenes[num_scene][1]):
-                # copy, not a view: cv2 draw calls below mutate their first
-                # arg in place, and frames[i] must stay untouched (write_
-                # highlights/write_rallies_only re-slice imgs_res, not frames)
-                img_res = frames[i].copy()
-                inv_mat = homography_matrices[i]
+        if ball_speed is not None and ball_speed[i] is not None:
+            img_res = cv2.putText(img_res, '{:.0f} km/h'.format(ball_speed[i]),
+                  org=(int(ball_track[i][0]) + 8, int(ball_track[i][1]) + 30),
+                  fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+                  fontScale=0.8,
+                  thickness=2,
+                  color=(0, 255, 0))
 
-                # draw ball trajectory
-                if ball_track[i][0] is not None:
-                    if draw_trace:
-                        for j in range(0, trace):
-                            if i-j >= 0:
-                                if ball_track[i-j][0] is not None:
-                                    draw_x = int(ball_track[i-j][0])
-                                    draw_y = int(ball_track[i-j][1])
-                                    img_res = cv2.circle(img_res, (draw_x, draw_y),
-                                    radius=3, color=(0, 255, 0), thickness=2)
-                    else:    
-                        img_res = cv2.circle(img_res , (int(ball_track[i][0]), int(ball_track[i][1])), radius=5,
-                                             color=(0, 255, 0), thickness=2)
-                        img_res = cv2.putText(img_res, 'ball',
-                              org=(int(ball_track[i][0]) + 8, int(ball_track[i][1]) + 8),
-                              fontFace=cv2.FONT_HERSHEY_SIMPLEX,
-                              fontScale=0.8,
-                              thickness=2,
-                              color=(0, 255, 0))
+        if serve_frames is not None and i in serve_frames:
+            img_res = cv2.putText(img_res, 'SERVIS',
+                  org=(int(ball_track[i][0]) + 8, int(ball_track[i][1]) + 52),
+                  fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+                  fontScale=0.8,
+                  thickness=2,
+                  color=(0, 255, 255))
 
-                    if ball_speed is not None and ball_speed[i] is not None:
-                        img_res = cv2.putText(img_res, '{:.0f} km/h'.format(ball_speed[i]),
-                              org=(int(ball_track[i][0]) + 8, int(ball_track[i][1]) + 30),
-                              fontFace=cv2.FONT_HERSHEY_SIMPLEX,
-                              fontScale=0.8,
-                              thickness=2,
-                              color=(0, 255, 0))
+    # draw court keypoints
+    if kps_court[i] is not None:
+        for j in range(len(kps_court[i])):
+            img_res = cv2.circle(img_res, (int(kps_court[i][j][0, 0]), int(kps_court[i][j][0, 1])),
+                              radius=0, color=(0, 0, 255), thickness=10)
 
-                    if serve_frames is not None and i in serve_frames:
-                        img_res = cv2.putText(img_res, 'SERVIS',
-                              org=(int(ball_track[i][0]) + 8, int(ball_track[i][1]) + 52),
-                              fontFace=cv2.FONT_HERSHEY_SIMPLEX,
-                              fontScale=0.8,
-                              thickness=2,
-                              color=(0, 255, 255))
+    height, width, _ = img_res.shape
 
-                # draw court keypoints
-                if kps_court[i] is not None:
-                    for j in range(len(kps_court[i])):
-                        img_res = cv2.circle(img_res, (int(kps_court[i][j][0, 0]), int(kps_court[i][j][0, 1])),
-                                          radius=0, color=(0, 0, 255), thickness=10)
+    # draw bounce in minimap
+    if i in bounces and inv_mat is not None and ball_track[i][0] is not None:
+        ball_point = ball_track[i]
+        ball_point = np.array(ball_point, dtype=np.float32).reshape(1, 1, 2)
+        ball_point = cv2.perspectiveTransform(ball_point, inv_mat)
+        court_img = cv2.circle(court_img, (int(ball_point[0, 0, 0]), int(ball_point[0, 0, 1])),
+                                           radius=0, color=(0, 255, 255), thickness=50)
 
-                height, width, _ = img_res.shape
+    minimap = court_img.copy()
 
-                # draw bounce in minimap
-                if i in bounces and inv_mat is not None and ball_track[i][0] is not None:
-                    ball_point = ball_track[i]
-                    ball_point = np.array(ball_point, dtype=np.float32).reshape(1, 1, 2)
-                    ball_point = cv2.perspectiveTransform(ball_point, inv_mat)
-                    court_img = cv2.circle(court_img, (int(ball_point[0, 0, 0]), int(ball_point[0, 0, 1])),
-                                                       radius=0, color=(0, 255, 255), thickness=50)
+    # draw persons
+    persons = persons_top[i] + persons_bottom[i]
+    for j, person in enumerate(persons):
+        person_bbox = list(person[0])
+        img_res = cv2.rectangle(img_res, (int(person_bbox[0]), int(person_bbox[1])),
+                                (int(person_bbox[2]), int(person_bbox[3])), [255, 0, 0], 2)
 
-                minimap = court_img.copy()
+        # transmit person point to minimap
+        person_point = list(person[1])
+        person_point = np.array(person_point, dtype=np.float32).reshape(1, 1, 2)
+        person_point = cv2.perspectiveTransform(person_point, inv_mat)
+        minimap = cv2.circle(minimap, (int(person_point[0, 0, 0]), int(person_point[0, 0, 1])),
+                                           radius=0, color=(255, 0, 0), thickness=80)
 
-                # draw persons
-                persons = persons_top[i] + persons_bottom[i]
-                for j, person in enumerate(persons):
-                    person_bbox = list(person[0])
-                    img_res = cv2.rectangle(img_res, (int(person_bbox[0]), int(person_bbox[1])),
-                                            (int(person_bbox[2]), int(person_bbox[3])), [255, 0, 0], 2)
+    minimap = cv2.resize(minimap, (_MINIMAP_WIDTH, _MINIMAP_HEIGHT))
+    img_res[30:(30 + _MINIMAP_HEIGHT), (width - 30 - _MINIMAP_WIDTH):(width - 30), :] = minimap
 
-                    # transmit person point to minimap
-                    person_point = list(person[1])
-                    person_point = np.array(person_point, dtype=np.float32).reshape(1, 1, 2)
-                    person_point = cv2.perspectiveTransform(person_point, inv_mat)
-                    minimap = cv2.circle(minimap, (int(person_point[0, 0, 0]), int(person_point[0, 0, 1])),
-                                                       radius=0, color=(255, 0, 0), thickness=80)
+    # fixed HUD (below the minimap): peak speed of the current bounce-to-bounce shot,
+    # stable for the whole flight so it stays readable while the ball is moving
+    if shot_max_speed is not None and shot_max_speed[i] is not None:
+        hud_x1 = width - 30 - _MINIMAP_WIDTH
+        hud_x2 = width - 30
+        hud_y1 = 30 + _MINIMAP_HEIGHT + 10
+        hud_y2 = hud_y1 + 50
+        img_res = cv2.rectangle(img_res, (hud_x1, hud_y1), (hud_x2, hud_y2), (0, 0, 0), -1)
+        img_res = cv2.putText(img_res, '{:.0f} km/h'.format(shot_max_speed[i]),
+              org=(hud_x1 + 10, hud_y2 - 15),
+              fontFace=cv2.FONT_HERSHEY_SIMPLEX,
+              fontScale=0.9,
+              thickness=2,
+              color=(0, 255, 255))
 
-                minimap = cv2.resize(minimap, (width_minimap, height_minimap))
-                img_res[30:(30 + height_minimap), (width - 30 - width_minimap):(width - 30), :] = minimap
+    return img_res, court_img
 
-                # fixed HUD (below the minimap): peak speed of the current bounce-to-bounce shot,
-                # stable for the whole flight so it stays readable while the ball is moving
-                if shot_max_speed is not None and shot_max_speed[i] is not None:
-                    hud_x1 = width - 30 - width_minimap
-                    hud_x2 = width - 30
-                    hud_y1 = 30 + height_minimap + 10
-                    hud_y2 = hud_y1 + 50
-                    img_res = cv2.rectangle(img_res, (hud_x1, hud_y1), (hud_x2, hud_y2), (0, 0, 0), -1)
-                    img_res = cv2.putText(img_res, '{:.0f} km/h'.format(shot_max_speed[i]),
-                          org=(hud_x1 + 10, hud_y2 - 15),
-                          fontFace=cv2.FONT_HERSHEY_SIMPLEX,
-                          fontScale=0.9,
-                          thickness=2,
-                          color=(0, 255, 255))
 
-                imgs_res.append(img_res)
-
-        else:    
-            imgs_res = imgs_res + frames[scenes[num_scene][0]:scenes[num_scene][1]] 
-    return imgs_res        
- 
-def write(imgs_res, fps, path_output_video):
-    height, width = imgs_res[0].shape[:2]
+def _open_writer(path, fps, width, height):
     # avc1 (H.264) instead of DIVX (MPEG-4 Part 2): browsers, including
     # Chrome desktop and mobile, cannot play DIVX/FMP4 in an HTML5 <video>
     # element, which broke the web UI's video preview.
-    out = cv2.VideoWriter(path_output_video, cv2.VideoWriter_fourcc(*'avc1'), fps, (width, height))
-    for num in range(len(imgs_res)):
-        frame = imgs_res[num]
-        out.write(frame)
-    out.release()
+    return cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*'avc1'), fps, (width, height))
 
 
-def write_highlights(imgs_res, highlights, fps, output_dir):
+def analyze_streaming(path_input_video, scenes, ball_detector, court_detector, person_detector,
+                       detect_persons, ball_batch_size, person_batch_size, report):
     """
-    Write each selected highlight rally (see rally_analyzer.select_highlights)
-    as its own short clip, reusing the already-rendered frames (ball/court/
-    speed overlays included) - no re-inference needed.
-    :params
-        imgs_res: list of rendered frames, as returned by render_output()
-        highlights: list of {rally, reasons} dicts from select_highlights
-        fps: video frame rate
-        output_dir: directory to write clips into (created if missing)
+    Pass 1 of the streaming pipeline: decode the video once, frame by frame,
+    driving ball/court/person detection inline, and keep only their
+    lightweight per-frame metadata (never the whole video's pixels at once).
+    Peak memory is bounded by a small batch window instead of video length.
+
+    Court homography reproduces court_detector.infer_model's exact
+    broadcast-per-scene semantics: it probes up to config.COURT_MAX_PROBE_FRAMES
+    frames at the start of each scene, then assigns whichever result it found
+    (even to the probe frames themselves) to the entire scene - so this
+    buffers just that small probe window (default 5 frames) per scene until
+    resolved, then backfills. Person detection on the buffered probe-window
+    frames is deferred until the scene's homography resolves, then run
+    batched on the backlog; frames afterward reuse the resolved homography
+    immediately.
     :return
-        list of dicts {rally_no, reasons, path} for each clip actually written
+        (ball_track, homography_matrices, kps_court, persons_top, persons_bottom, fps, num_frames)
     """
-    os.makedirs(output_dir, exist_ok=True)
-    clips = []
-    for h in highlights:
-        rally = h['rally']
-        frames = imgs_res[rally['start_frame']:rally['end_frame']]
-        if not frames:
-            continue
-        reason_tag = '_'.join(h['reasons'])
-        path = os.path.join(output_dir, 'highlight_rally{:02d}_{}.mp4'.format(rally['rally_no'], reason_tag))
-        write(frames, fps, path)
-        clips.append({'rally_no': rally['rally_no'], 'reasons': h['reasons'], 'path': path})
-    return clips
+    cap = cv2.VideoCapture(path_input_video)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    frame_count_hint = max(cap.get(cv2.CAP_PROP_FRAME_COUNT), 1)
+
+    ball_track = [(None, None), (None, None)]
+    ball_window = []
+    ball_prev_pred = [None, None]
+    ball_scale_x = ball_scale_y = None
+
+    court_width, court_height = 640, 360
+    court_scale_x = court_scale_y = None
+
+    homography_matrices = []
+    kps_court = []
+    persons_top = []
+    persons_bottom = []
+
+    scene_ptr = 0
+    scene_start, scene_end = scenes[0]
+    scene_matrix, scene_points, scene_probe_count = None, None, 0
+    scene_pending = []
+    person_pending = []
+
+    def flush_person(pending, matrix):
+        if not pending or matrix is None or not detect_persons:
+            return
+        results = person_detector.detect_batch([f for _, f in pending])
+        for (idx, frame), (bboxes, probs) in zip(pending, results):
+            top, bottom = person_detector.filter_top_bottom(frame, matrix, bboxes, probs, filter_players=False)
+            persons_top[idx] = top
+            persons_bottom[idx] = bottom
+
+    def resolve_scene():
+        for idx, _ in scene_pending:
+            homography_matrices[idx] = scene_matrix
+            kps_court[idx] = scene_points
+        flush_person(scene_pending, scene_matrix)
+        scene_pending.clear()
+
+    def flush_ball(final=False):
+        nonlocal ball_window, ball_prev_pred
+        if len(ball_window) < 3:
+            return
+        predictions, ball_prev_pred = ball_detector.infer_batch(ball_window, ball_prev_pred, ball_scale_x, ball_scale_y)
+        ball_track.extend(predictions)
+        ball_window = [] if final else ball_window[-2:]
+
+    i = 0
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        if ball_scale_x is None:
+            orig_height, orig_width = frame.shape[:2]
+            ball_scale_x = orig_width / ball_detector.width
+            ball_scale_y = orig_height / ball_detector.height
+            court_scale_x = orig_width / court_width
+            court_scale_y = orig_height / court_height
+
+        homography_matrices.append(None)
+        kps_court.append(None)
+        persons_top.append([])
+        persons_bottom.append([])
+
+        # ball: continuous sliding window, independent of scene boundaries
+        ball_window.append(cv2.resize(frame, (ball_detector.width, ball_detector.height)))
+        if len(ball_window) >= ball_batch_size + 2:
+            flush_ball()
+
+        # scene boundary: resolve any still-pending probe backlog before moving on
+        if i == scene_end and scene_ptr + 1 < len(scenes):
+            if scene_pending:
+                resolve_scene()
+            scene_ptr += 1
+            scene_start, scene_end = scenes[scene_ptr]
+            scene_matrix, scene_points, scene_probe_count = None, None, 0
+
+        # court + person
+        if scene_matrix is None and scene_probe_count < config.COURT_MAX_PROBE_FRAMES:
+            m, p = court_detector.infer_frame(frame, court_scale_x, court_scale_y)
+            scene_probe_count += 1
+            scene_pending.append((i, frame))
+            if m is not None:
+                scene_matrix, scene_points = m, p
+            if scene_matrix is not None or scene_probe_count >= config.COURT_MAX_PROBE_FRAMES or i == scene_end - 1:
+                resolve_scene()
+        else:
+            homography_matrices[i] = scene_matrix
+            kps_court[i] = scene_points
+            if detect_persons and scene_matrix is not None:
+                person_pending.append((i, frame))
+                if len(person_pending) >= person_batch_size:
+                    flush_person(person_pending, scene_matrix)
+                    person_pending = []
+
+        if i % 20 == 0:
+            report('video analiz ediliyor', min(0.05 + 0.65 * (i / frame_count_hint), 0.70))
+
+        i += 1
+
+    flush_ball(final=True)
+    if person_pending:
+        flush_person(person_pending, scene_matrix)
+    if scene_pending:
+        resolve_scene()
+
+    cap.release()
+    return ball_track, homography_matrices, kps_court, persons_top, persons_bottom, fps, i
 
 
-def write_rallies_only(imgs_res, rallies, fps, path_output_video):
+def render_streaming(path_input_video, path_output_video, scenes, bounces, ball_track, homography_matrices,
+                      kps_court, persons_top, persons_bottom, ball_speed, shot_max_speed, serve_frames,
+                      rallies, num_frames, fps, draw_trace, trace, generate_highlights, highlights_top_n,
+                      highlights_dir, trim_dead_time, rallies_only_path, report):
     """
-    Concatenate just the rally windows, in chronological order, into a single
-    video - skips the "dead time" between points (changeovers, ball pickup,
-    etc.), the same trim SwingVision applies to shrink a full match into a
-    much shorter watch. Reuses the already-rendered frames, no re-inference.
-    :params
-        imgs_res: list of rendered frames, as returned by render_output()
-        rallies: list of rally dicts (analyze_rallies output; rally_no order
-            is already start_frame-ascending)
-        fps: video frame rate
-        path_output_video: output path
+    Pass 2 of the streaming pipeline: decode the video a second time, frame
+    by frame, render each with Pass 1's metadata and write it straight to
+    the output VideoWriter (and any rallies-only/highlight writer whose
+    window it falls in), discarding it immediately - no second full-length
+    frame list, no third decode for highlight/rallies-only clips.
     :return
-        path_output_video if at least one rally produced frames, else None
+        (rallies_only_video, highlight_clips) - same shape as the old
+        write_rallies_only/write_highlights return values
     """
-    frames = []
-    for rally in rallies:
-        frames.extend(imgs_res[rally['start_frame']:rally['end_frame']])
-    if not frames:
-        return None
-    write(frames, fps, path_output_video)
-    return path_output_video
+    eps = 1e-15
+    is_track = [x is not None for x in homography_matrices]
+    scene_drawable = []
+    for s, e in scenes:
+        sum_track = sum(is_track[s:e])
+        len_track = e - s
+        scene_drawable.append(sum_track/(len_track+eps) > 0.5)
+
+    highlights = select_highlights(rallies, top_n=highlights_top_n) if generate_highlights else []
+
+    out_dir_highlights = highlights_dir or os.path.join(
+        os.path.dirname(os.path.abspath(path_output_video)), 'highlights')
+    out_path_rallies_only = rallies_only_path or os.path.join(
+        os.path.dirname(os.path.abspath(path_output_video)), 'rallies_only.mp4')
+
+    cap = cv2.VideoCapture(path_input_video)
+    main_writer = None
+    rallies_writer = None
+    highlight_writer = None
+    highlight_writer_info = None
+    highlight_clips = []
+    rally_ptr = 0
+    highlight_ptr = 0
+
+    scene_ptr = 0
+    scene_start, scene_end = scenes[0]
+    court_img = get_court_img() if scene_drawable[0] else None
+
+    i = 0
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        if main_writer is None:
+            height, width = frame.shape[:2]
+            main_writer = _open_writer(path_output_video, fps, width, height)
+
+        if i == scene_end and scene_ptr + 1 < len(scenes):
+            scene_ptr += 1
+            scene_start, scene_end = scenes[scene_ptr]
+            court_img = get_court_img() if scene_drawable[scene_ptr] else None
+
+        if scene_drawable[scene_ptr]:
+            img_res = frame.copy()
+            img_res, court_img = render_frame(img_res, i, bounces, ball_track, homography_matrices, kps_court,
+                                               persons_top, persons_bottom, ball_speed, shot_max_speed,
+                                               serve_frames, court_img, draw_trace, trace)
+        else:
+            img_res = frame
+
+        main_writer.write(img_res)
+
+        if trim_dead_time:
+            while rally_ptr < len(rallies) and i >= rallies[rally_ptr]['end_frame']:
+                rally_ptr += 1
+            if rally_ptr < len(rallies) and rallies[rally_ptr]['start_frame'] <= i < rallies[rally_ptr]['end_frame']:
+                if rallies_writer is None:
+                    os.makedirs(os.path.dirname(os.path.abspath(out_path_rallies_only)), exist_ok=True)
+                    rallies_writer = _open_writer(out_path_rallies_only, fps, width, height)
+                rallies_writer.write(img_res)
+
+        if generate_highlights:
+            if highlight_ptr < len(highlights) and i >= highlights[highlight_ptr]['rally']['end_frame']:
+                if highlight_writer is not None:
+                    highlight_writer.release()
+                    highlight_clips.append(highlight_writer_info)
+                    highlight_writer = None
+                highlight_ptr += 1
+            if highlight_ptr < len(highlights):
+                h = highlights[highlight_ptr]
+                r = h['rally']
+                if r['start_frame'] <= i < r['end_frame']:
+                    if highlight_writer is None:
+                        os.makedirs(out_dir_highlights, exist_ok=True)
+                        reason_tag = '_'.join(h['reasons'])
+                        path = os.path.join(out_dir_highlights,
+                                             'highlight_rally{:02d}_{}.mp4'.format(r['rally_no'], reason_tag))
+                        highlight_writer = _open_writer(path, fps, width, height)
+                        highlight_writer_info = {'rally_no': r['rally_no'], 'reasons': h['reasons'], 'path': path}
+                    highlight_writer.write(img_res)
+
+        if i % 20 == 0:
+            report('video oluşturuluyor ve yazılıyor', 0.75 + 0.23 * (i / max(num_frames, 1)))
+
+        i += 1
+
+    if highlight_writer is not None:
+        highlight_writer.release()
+        highlight_clips.append(highlight_writer_info)
+
+    cap.release()
+    if main_writer is not None:
+        main_writer.release()
+
+    rallies_only_video = None
+    if rallies_writer is not None:
+        rallies_writer.release()
+        rallies_only_video = out_path_rallies_only
+
+    return rallies_only_video, highlight_clips
 
 
 def _select_device(prefer_alt_gpu=True):
@@ -289,18 +440,19 @@ def process_video(path_ball_track_model, path_court_model, path_bounce_model,
             skip it entirely and speed up runs that only care about ball
             speed / court overlay.
         progress_callback: optional callable(message, fraction, eta_seconds)
-            invoked before each pipeline stage, so callers (e.g. a web UI) can
-            show a real progress bar. fraction is 0..1 (coarse, one stage
-            granularity - not per-frame). eta_seconds is the estimated time
-            left based on elapsed time / fraction so far, or None on the
-            first call (no elapsed time to extrapolate from yet).
+            invoked periodically (every ~20 frames within each pass, plus at
+            each pipeline phase boundary), so callers (e.g. a web UI) can
+            show a real, frame-driven progress bar. fraction is 0..1.
+            eta_seconds is the estimated time left based on elapsed time /
+            fraction so far, or None on the first call (no elapsed time to
+            extrapolate from yet).
         generate_highlights: whether to also cut short clips for the
             fastest-shot / longest rallies (see rally_analyzer.select_highlights).
         highlights_dir: directory to write highlight clips into, or None to
             use a 'highlights' subfolder next to path_output_video.
         highlights_top_n: how many rallies to pick per highlight criterion.
         trim_dead_time: whether to also write a single video that
-            concatenates only the rally windows (see write_rallies_only),
+            concatenates only the rally windows (see render_streaming),
             skipping the non-rally "dead time" between points.
         rallies_only_path: output path for the dead-time-trimmed video, or
             None to use 'rallies_only.mp4' next to path_output_video.
@@ -326,29 +478,21 @@ def process_video(path_ball_track_model, path_court_model, path_bounce_model,
         ball_court_device = device
         person_device = device
 
-    report('video okunuyor', 0.02)
-    frames, fps = read_video(path_input_video)
+    report('sahne tespiti', 0.02)
     scenes = scene_detect(path_input_video)
 
-    report('ball detection ({})'.format(ball_court_device), 0.05)
     ball_detector = BallDetector(path_ball_track_model, ball_court_device)
-    ball_track = ball_detector.infer_model(frames, batch_size=_infer_batch_size(ball_court_device, config.BALL_INFER_BATCH_SIZE))
-
-    report('court detection ({})'.format(ball_court_device), 0.55)
     court_detector = CourtDetectorNet(path_court_model, ball_court_device)
-    homography_matrices, kps_court = court_detector.infer_model(frames, scenes=scenes)
+    person_detector = PersonDetector(person_device) if detect_persons else None
 
-    if detect_persons:
-        report('person detection ({})'.format(person_device), 0.65)
-        person_detector = PersonDetector(person_device)
-        persons_top, persons_bottom = person_detector.track_players(
-            frames, homography_matrices, filter_players=False,
-            batch_size=_infer_batch_size(person_device, config.PERSON_INFER_BATCH_SIZE))
-    else:
-        persons_top = [[] for _ in frames]
-        persons_bottom = [[] for _ in frames]
+    report('video analiz ediliyor ({})'.format(ball_court_device), 0.05)
+    ball_track, homography_matrices, kps_court, persons_top, persons_bottom, fps, num_frames = analyze_streaming(
+        path_input_video, scenes, ball_detector, court_detector, person_detector, detect_persons,
+        _infer_batch_size(ball_court_device, config.BALL_INFER_BATCH_SIZE),
+        _infer_batch_size(person_device, config.PERSON_INFER_BATCH_SIZE),
+        report)
 
-    report('bounce detection', 0.72)
+    report('sekme tespiti', 0.72)
     bounce_detector = BounceDetector(path_bounce_model)
     x_ball = [x[0] for x in ball_track]
     y_ball = [x[1] for x in ball_track]
@@ -364,31 +508,16 @@ def process_video(path_ball_track_model, path_court_model, path_bounce_model,
             if s['is_serve']:
                 serve_frames.update(range(s['start_frame'], s['end_frame']))
 
-    report('video oluşturuluyor', 0.78)
-    imgs_res = render_output(frames, scenes, bounces, ball_track, homography_matrices, kps_court, persons_top, persons_bottom,
-                    ball_speed=ball_speed, shot_max_speed=shot_max_speed, serve_frames=serve_frames,
-                    draw_trace=draw_trace)
-
-    report('video yazılıyor', 0.90)
-    write(imgs_res, fps, path_output_video)
-
-    rallies_only_video = None
-    if trim_dead_time:
-        report('ölü zaman kırpılıyor', 0.94)
-        out_path = rallies_only_path or os.path.join(
-            os.path.dirname(os.path.abspath(path_output_video)), 'rallies_only.mp4')
-        rallies_only_video = write_rallies_only(imgs_res, rallies, fps, out_path)
-
-    highlight_clips = []
-    if generate_highlights:
-        report('highlight klipleri oluşturuluyor', 0.97)
-        highlights = select_highlights(rallies, top_n=highlights_top_n)
-        out_dir = highlights_dir or os.path.join(os.path.dirname(os.path.abspath(path_output_video)), 'highlights')
-        highlight_clips = write_highlights(imgs_res, highlights, fps, out_dir)
+    report('video oluşturuluyor ve yazılıyor', 0.75)
+    rallies_only_video, highlight_clips = render_streaming(
+        path_input_video, path_output_video, scenes, bounces, ball_track, homography_matrices, kps_court,
+        persons_top, persons_bottom, ball_speed, shot_max_speed, serve_frames, rallies, num_frames, fps,
+        draw_trace, 7, generate_highlights, highlights_top_n, highlights_dir, trim_dead_time,
+        rallies_only_path, report)
 
     valid_speeds = [s for s in ball_speed if s is not None]
     stats = {
-        'num_frames': len(frames),
+        'num_frames': num_frames,
         'fps': fps,
         'num_bounces': len(bounces),
         'num_rallies': len(rallies),

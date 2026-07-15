@@ -17,7 +17,7 @@ class CourtDetectorNet():
             self.model = self.model.to(device)
             self.model.eval()
 
-    def _infer_frame(self, image, scale_x, scale_y):
+    def infer_frame(self, image, scale_x, scale_y):
         """ Run the court-keypoint model on a single frame.
         :return
             matrix_trans: inverse homography matrix (frame -> court reference), or None
@@ -88,7 +88,7 @@ class CourtDetectorNet():
         for start, end in tqdm(scenes):
             matrix_trans, points = None, None
             for num_frame in range(start, min(end, start + max_probe_frames)):
-                matrix_trans, points = self._infer_frame(frames[num_frame], scale_x, scale_y)
+                matrix_trans, points = self.infer_frame(frames[num_frame], scale_x, scale_y)
                 if matrix_trans is not None:
                     break
             for i in range(start, end):

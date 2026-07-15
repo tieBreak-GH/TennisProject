@@ -18,6 +18,45 @@ class BallDetector:
         self.width = 640
         self.height = 360
 
+    def infer_batch(self, resized_window, prev_pred, scale_x, scale_y):
+        """ Run the model forward pass on one batch of sliding 3-frame
+        windows, then sequential (prev_pred-dependent) postprocessing.
+        Factored out of infer_model so streaming callers (main.py) can feed
+        it a bounded window of already-resized frames pulled from a video
+        decode loop, instead of requiring the whole video resized in memory.
+        :params
+            resized_window: list of already-resized (640x360) frames;
+                produces len(resized_window)-2 predictions - window j uses
+                (resized_window[j], resized_window[j-1], resized_window[j-2])
+                as (current, prev, preprev) for j in [2, len(resized_window)-1]
+            prev_pred: [x, y] postprocess state carried in from the previous
+                batch (sequential outlier-filter dependency)
+            scale_x, scale_y: scale factors back to the original frame size
+        :return
+            (predictions, prev_pred): predictions is a list of (x, y)
+            tuples, one per window; prev_pred is the updated postprocess
+            state to pass into the next call
+        """
+        num_windows = len(resized_window) - 2
+        batch_inputs = []
+        for j in range(2, num_windows + 2):
+            imgs = np.concatenate((resized_window[j], resized_window[j-1], resized_window[j-2]), axis=2)
+            imgs = imgs.astype(np.float32)/255.0
+            imgs = np.rollaxis(imgs, 2, 0)
+            batch_inputs.append(imgs)
+        inp = np.stack(batch_inputs, axis=0)
+
+        with torch.no_grad():
+            out = self.model(torch.from_numpy(inp).float().to(self.device))
+        output = out.argmax(dim=1).detach().cpu().numpy()
+
+        predictions = []
+        for i in range(output.shape[0]):
+            x_pred, y_pred = self.postprocess(output[i:i+1], prev_pred, scale_x, scale_y)
+            prev_pred = [x_pred, y_pred]
+            predictions.append((x_pred, y_pred))
+        return predictions, prev_pred
+
     def infer_model(self, frames, batch_size=config.BALL_INFER_BATCH_SIZE):
         """ Run pretrained model on a consecutive list of frames
         :params
@@ -42,22 +81,8 @@ class BallDetector:
         num_windows = len(frames) - 2
         for batch_start in tqdm(range(0, num_windows, batch_size)):
             batch_end = min(batch_start + batch_size, num_windows)
-            batch_inputs = []
-            for num in range(batch_start + 2, batch_end + 2):
-                imgs = np.concatenate((resized[num], resized[num-1], resized[num-2]), axis=2)
-                imgs = imgs.astype(np.float32)/255.0
-                imgs = np.rollaxis(imgs, 2, 0)
-                batch_inputs.append(imgs)
-            inp = np.stack(batch_inputs, axis=0)
-
-            with torch.no_grad():
-                out = self.model(torch.from_numpy(inp).float().to(self.device))
-            output = out.argmax(dim=1).detach().cpu().numpy()
-
-            for i in range(output.shape[0]):
-                x_pred, y_pred = self.postprocess(output[i:i+1], prev_pred, scale_x, scale_y)
-                prev_pred = [x_pred, y_pred]
-                ball_track.append((x_pred, y_pred))
+            predictions, prev_pred = self.infer_batch(resized[batch_start:batch_end+2], prev_pred, scale_x, scale_y)
+            ball_track.extend(predictions)
         return ball_track
 
     def postprocess(self, feature_map, prev_pred, scale_x=2, scale_y=2, max_dist=config.BALL_MAX_JUMP_PX):

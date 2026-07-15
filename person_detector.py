@@ -38,7 +38,7 @@ class PersonDetector():
     def detect(self, image, person_min_score=config.PERSON_MIN_SCORE):
         return self.detect_batch([image], person_min_score)[0]
 
-    def _filter_top_bottom(self, image, inv_matrix, bboxes, probs, filter_players=False):
+    def filter_top_bottom(self, image, inv_matrix, bboxes, probs, filter_players=False):
         matrix = cv2.invert(inv_matrix)[1]
         mask_top_court = cv2.warpPerspective(self.ref_top_court, matrix, image.shape[1::-1])
         mask_bottom_court = cv2.warpPerspective(self.ref_bottom_court, matrix, image.shape[1::-1])
@@ -64,7 +64,7 @@ class PersonDetector():
         # rejecting non-players (ball kids, officials, crowd), so this can
         # stay low without letting false positives through.
         bboxes, probs = self.detect(image, person_min_score=config.PERSON_MIN_SCORE)
-        return self._filter_top_bottom(image, inv_matrix, bboxes, probs, filter_players)
+        return self.filter_top_bottom(image, inv_matrix, bboxes, probs, filter_players)
 
     def filter_players(self, person_bboxes_top, person_bboxes_bottom, matrix):
         """
@@ -98,7 +98,7 @@ class PersonDetector():
             batch_indices = valid_indices[batch_start:batch_start + batch_size]
             batch_results = self.detect_batch([frames[i] for i in batch_indices])
             for idx, (bboxes, probs) in zip(batch_indices, batch_results):
-                person_top, person_bottom = self._filter_top_bottom(frames[idx], matrix_all[idx], bboxes, probs,
+                person_top, person_bottom = self.filter_top_bottom(frames[idx], matrix_all[idx], bboxes, probs,
                                                                       filter_players)
                 persons_top[idx] = person_top
                 persons_bottom[idx] = person_bottom
