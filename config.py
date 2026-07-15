@@ -45,6 +45,11 @@ BOUNCE_EXTRAPOLATION_MAX_JUMP_PX = 80  # smooth_predictions: max jump allowed
 RALLY_MAX_GAP_SECONDS = 1.5     # ball-tracking gap that starts a new rally
 SERVE_BASELINE_MARGIN_CM = 300  # how close a shot's start must be to a
                                  # baseline (court-plane cm) to count as a serve
+LINE_CALL_MARGIN_CM = 20        # "too close to call" buffer around a serve's
+                                 # target service box - a rough estimate, not
+                                 # calibrated against real footage; accounts
+                                 # for homography + bounce-frame detection
+                                 # error, not real line width
 
 # -- Court keypoint detection (court_detection_net.py) --
 COURT_MAX_PROBE_FRAMES = 5       # frames tried per scene before giving up

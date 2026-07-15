@@ -7,6 +7,12 @@ from court_reference import CourtReference
 _court_ref = CourtReference()
 _BASELINE_TOP_Y = _court_ref.baseline_top[0][1]
 _BASELINE_BOTTOM_Y = _court_ref.baseline_bottom[0][1]
+_NET_Y = _court_ref.net[0][1]
+_TOP_SERVICE_Y = _court_ref.top_inner_line[0][1]
+_BOTTOM_SERVICE_Y = _court_ref.bottom_inner_line[0][1]
+_CENTER_X = _court_ref.middle_line[0][0]
+_LEFT_SINGLES_X = _court_ref.left_inner_line[0][0]
+_RIGHT_SINGLES_X = _court_ref.right_inner_line[0][0]
 
 
 def _to_court_point(point, matrix):
@@ -23,6 +29,71 @@ def _is_near_baseline(court_point, margin_cm=config.SERVE_BASELINE_MARGIN_CM):
     """
     y = court_point[1]
     return abs(y - _BASELINE_TOP_Y) <= margin_cm or abs(y - _BASELINE_BOTTOM_Y) <= margin_cm
+
+
+def _target_service_box(serve_x, serve_baseline):
+    """
+    A serve must land in the service box diagonally opposite the server:
+    same half (left/right of the center line) mirrored across, on the
+    receiving baseline's service line. Verified via the court's 180-degree
+    rotational symmetry: a server at the bottom baseline right of center
+    (deuce) targets the top baseline's LEFT box, and vice versa.
+    :params
+        serve_x: server's court-plane x position (approximated by the ball's
+            position at the start of the serve)
+        serve_baseline: 'top' or 'bottom' - which baseline the serve was hit from
+    :return
+        (x_min, x_max, y_min, y_max) of the target service box, in
+        CourtReference court-plane units (~cm)
+    """
+    x_min, x_max = (_LEFT_SINGLES_X, _CENTER_X) if serve_x > _CENTER_X else (_CENTER_X, _RIGHT_SINGLES_X)
+    y_min, y_max = (_NET_Y, _BOTTOM_SERVICE_Y) if serve_baseline == 'top' else (_TOP_SERVICE_Y, _NET_Y)
+    return x_min, x_max, y_min, y_max
+
+
+def _classify_point_in_box(point, box, margin_cm):
+    """
+    Classify a court-plane point against a box, with a "too close to call"
+    margin around the edges (homography + bounce-frame detection error
+    means a hard in/out call right at the line isn't trustworthy).
+    :return
+        'in' if comfortably inside, 'out' if comfortably outside, else
+        'belirsiz' (uncertain) when within margin_cm of any edge
+    """
+    x, y = point
+    x_min, x_max, y_min, y_max = box
+    inside_margin = min(x - x_min, x_max - x, y - y_min, y_max - y)
+    if inside_margin > margin_cm:
+        return 'in'
+    if inside_margin < -margin_cm:
+        return 'out'
+    return 'belirsiz'
+
+
+def _call_serve_line(serve_court_point, bounce_frame, ball_track, bounce_set, homography_matrices, margin_cm):
+    """
+    Call a serve in/out against its target service box (see
+    _target_service_box), or None if there's no reliable bounce to check
+    (segment_shots sets a shot's end_frame to the bounce frame that closed
+    it - if the rally never registered a bounce, end_frame is just the
+    rally's end, not a real bounce, so a call can't be made).
+    :params
+        serve_court_point: the serve's starting position, already projected
+            to court-plane coords (see analyze_rallies)
+        bounce_frame: candidate bounce frame index (a shot's end_frame)
+        bounce_set: set of frame indices where the ball actually bounced
+    :return
+        'in', 'out', 'belirsiz', or None
+    """
+    if bounce_frame not in bounce_set or ball_track[bounce_frame][0] is None:
+        return None
+    matrix = homography_matrices[bounce_frame]
+    if matrix is None:
+        return None
+    bounce_point = _to_court_point(ball_track[bounce_frame], matrix)
+    serve_baseline = 'top' if abs(serve_court_point[1] - _BASELINE_TOP_Y) < abs(serve_court_point[1] - _BASELINE_BOTTOM_Y) else 'bottom'
+    box = _target_service_box(serve_court_point[0], serve_baseline)
+    return _classify_point_in_box(bounce_point, box, margin_cm)
 
 
 def segment_rallies(ball_track, fps, max_gap_seconds=config.RALLY_MAX_GAP_SECONDS):
@@ -80,13 +151,18 @@ def segment_shots(start, end, bounce_frames):
 
 
 def analyze_rallies(ball_track, bounces, homography_matrices, ball_speed, fps,
-                     max_gap_seconds=config.RALLY_MAX_GAP_SECONDS, baseline_margin_cm=config.SERVE_BASELINE_MARGIN_CM):
+                     max_gap_seconds=config.RALLY_MAX_GAP_SECONDS, baseline_margin_cm=config.SERVE_BASELINE_MARGIN_CM,
+                     line_call_margin_cm=config.LINE_CALL_MARGIN_CM):
     """
     Segment the video into rallies and shots, and label each rally's first
     shot as a serve if its starting ball position projects near a baseline.
     This is the main defense against clips that start mid-rally: the first
     shot of the video trivially looks like "after a gap", but if it doesn't
-    start near a baseline it is not labeled a serve.
+    start near a baseline it is not labeled a serve. Serves are additionally
+    given an estimated in/out line call against their target service box
+    (see _call_serve_line) - deliberately scoped to serves only, since
+    bounce-frame precision and homography error make a general in/out call
+    on every shot unreliable.
     :params
         ball_track: list of (x, y) ball pixel coordinates per frame
         bounces: iterable of frame indices where the ball bounces
@@ -96,11 +172,14 @@ def analyze_rallies(ball_track, bounces, homography_matrices, ball_speed, fps,
         fps: video frame rate
         max_gap_seconds: see segment_rallies
         baseline_margin_cm: see _is_near_baseline
+        line_call_margin_cm: see _classify_point_in_box
     :return
         list of dicts, one per rally:
         {rally_no, start_frame, end_frame, duration_s, num_shots,
-         shots: [{shot_no, start_frame, end_frame, is_serve}],
+         shots: [{shot_no, start_frame, end_frame, is_serve, line_call}],
          avg_speed_kmh, max_speed_kmh}
+        line_call is 'in' / 'out' / 'belirsiz' for a called serve, or None
+        (not a serve, or no reliable bounce to call it against).
     """
     rally_windows = segment_rallies(ball_track, fps, max_gap_seconds)
     bounce_set = set(bounces)
@@ -112,16 +191,21 @@ def analyze_rallies(ball_track, bounces, homography_matrices, ball_speed, fps,
         shots = []
         for shot_no, (s_start, s_end) in enumerate(shot_windows, start=1):
             is_serve = False
+            line_call = None
             if shot_no == 1:
                 matrix = homography_matrices[s_start]
                 if matrix is not None and ball_track[s_start][0] is not None:
                     court_point = _to_court_point(ball_track[s_start], matrix)
                     is_serve = _is_near_baseline(court_point, baseline_margin_cm)
+                    if is_serve:
+                        line_call = _call_serve_line(court_point, s_end, ball_track, bounce_set,
+                                                      homography_matrices, line_call_margin_cm)
             shots.append({
                 'shot_no': shot_no,
                 'start_frame': s_start,
                 'end_frame': s_end,
                 'is_serve': is_serve,
+                'line_call': line_call,
             })
 
         speeds = [s for i in range(r_start, r_end) if (s := ball_speed[i]) is not None]

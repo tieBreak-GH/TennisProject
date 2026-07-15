@@ -54,6 +54,41 @@ def test_analyze_rallies_does_not_label_serve_away_from_baseline():
     assert bool(rallies[0]['shots'][0]['is_serve']) is False
 
 
+def test_analyze_rallies_serve_line_call_in():
+    # serve from bottom baseline (y=2935), x=1000 is right of center (832)
+    # -> target box is the top-left service box: x in [423,832], y in [1110,1748]
+    ball_track = [(1000.0, 2935.0), (600.0, 1400.0)]  # bounce well inside the box
+    rallies = analyze_rallies(ball_track, bounces=[1], homography_matrices=[IDENTITY] * 2,
+                               ball_speed=[None, None], fps=10)
+    assert rallies[0]['shots'][0]['line_call'] == 'in'
+
+
+def test_analyze_rallies_serve_line_call_out():
+    # same serve, but bounce lands on the wrong (right) side of the target box
+    ball_track = [(1000.0, 2935.0), (1000.0, 1400.0)]
+    rallies = analyze_rallies(ball_track, bounces=[1], homography_matrices=[IDENTITY] * 2,
+                               ball_speed=[None, None], fps=10)
+    assert rallies[0]['shots'][0]['line_call'] == 'out'
+
+
+def test_analyze_rallies_serve_line_call_uncertain_near_line():
+    # bounce only 7cm inside the center line (832) - within the default
+    # 20cm margin, so too close to call confidently
+    ball_track = [(1000.0, 2935.0), (825.0, 1400.0)]
+    rallies = analyze_rallies(ball_track, bounces=[1], homography_matrices=[IDENTITY] * 2,
+                               ball_speed=[None, None], fps=10)
+    assert rallies[0]['shots'][0]['line_call'] == 'belirsiz'
+
+
+def test_analyze_rallies_serve_line_call_none_without_a_bounce():
+    # a rally with no detected bounce has no real bounce frame to call against
+    ball_track = [(1000.0, 2935.0)]
+    rallies = analyze_rallies(ball_track, bounces=[], homography_matrices=[IDENTITY],
+                               ball_speed=[None], fps=10)
+    assert bool(rallies[0]['shots'][0]['is_serve']) is True
+    assert rallies[0]['shots'][0]['line_call'] is None
+
+
 def test_select_highlights_picks_top_n_per_criterion():
     rallies = [
         {'rally_no': 1, 'start_frame': 0, 'end_frame': 10, 'duration_s': 1.0, 'max_speed_kmh': 80},

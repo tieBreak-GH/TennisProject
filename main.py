@@ -25,9 +25,15 @@ def get_court_img():
 _MINIMAP_WIDTH = 166
 _MINIMAP_HEIGHT = 350
 
+_SERVE_LINE_CALL_LABELS = {
+    'in': 'SERVİS - İÇERİ',
+    'out': 'SERVİS - DIŞARI',
+    'belirsiz': 'SERVİS - BELİRSİZ',
+}
+
 
 def render_frame(img_res, i, bounces, ball_track, homography_matrices, kps_court, persons_top, persons_bottom,
-                  ball_speed, shot_max_speed, serve_frames, court_img, draw_trace, trace):
+                  ball_speed, shot_max_speed, serve_labels, court_img, draw_trace, trace):
     """
     Render one frame's overlays (ball trace/speed/serve label, court
     keypoints, minimap with bounce marks + player dots, HUD). Extracted from
@@ -73,8 +79,9 @@ def render_frame(img_res, i, bounces, ball_track, homography_matrices, kps_court
                   thickness=2,
                   color=(0, 255, 0))
 
-        if serve_frames is not None and i in serve_frames:
-            img_res = cv2.putText(img_res, 'SERVIS',
+        serve_label = serve_labels.get(i) if serve_labels is not None else None
+        if serve_label:
+            img_res = cv2.putText(img_res, serve_label,
                   org=(int(ball_track[i][0]) + 8, int(ball_track[i][1]) + 52),
                   fontFace=cv2.FONT_HERSHEY_SIMPLEX,
                   fontScale=0.8,
@@ -273,7 +280,7 @@ def analyze_streaming(path_input_video, scenes, ball_detector, court_detector, p
 
 
 def render_streaming(path_input_video, path_output_video, scenes, bounces, ball_track, homography_matrices,
-                      kps_court, persons_top, persons_bottom, ball_speed, shot_max_speed, serve_frames,
+                      kps_court, persons_top, persons_bottom, ball_speed, shot_max_speed, serve_labels,
                       rallies, num_frames, fps, draw_trace, trace, generate_highlights, highlights_top_n,
                       highlights_dir, trim_dead_time, rallies_only_path, report):
     """
@@ -333,7 +340,7 @@ def render_streaming(path_input_video, path_output_video, scenes, bounces, ball_
             img_res = frame.copy()
             img_res, court_img = render_frame(img_res, i, bounces, ball_track, homography_matrices, kps_court,
                                                persons_top, persons_bottom, ball_speed, shot_max_speed,
-                                               serve_frames, court_img, draw_trace, trace)
+                                               serve_labels, court_img, draw_trace, trace)
         else:
             img_res = frame
 
@@ -502,16 +509,18 @@ def process_video(path_ball_track_model, path_court_model, path_bounce_model,
     shot_max_speed = get_shot_max_speed(ball_speed, bounces)
 
     rallies = analyze_rallies(ball_track, bounces, homography_matrices, ball_speed, fps)
-    serve_frames = set()
+    serve_labels = {}
     for r in rallies:
         for s in r['shots']:
             if s['is_serve']:
-                serve_frames.update(range(s['start_frame'], s['end_frame']))
+                label = _SERVE_LINE_CALL_LABELS.get(s['line_call'], 'SERVİS')
+                for f in range(s['start_frame'], s['end_frame']):
+                    serve_labels[f] = label
 
     report('video oluşturuluyor ve yazılıyor', 0.75)
     rallies_only_video, highlight_clips = render_streaming(
         path_input_video, path_output_video, scenes, bounces, ball_track, homography_matrices, kps_court,
-        persons_top, persons_bottom, ball_speed, shot_max_speed, serve_frames, rallies, num_frames, fps,
+        persons_top, persons_bottom, ball_speed, shot_max_speed, serve_labels, rallies, num_frames, fps,
         draw_trace, 7, generate_highlights, highlights_top_n, highlights_dir, trim_dead_time,
         rallies_only_path, report)
 

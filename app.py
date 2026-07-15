@@ -13,6 +13,14 @@ COURT_MODEL = os.path.join(WEIGHTS_DIR, 'court_model.pt')
 BOUNCE_MODEL = os.path.join(WEIGHTS_DIR, 'bounce_model.cbm')
 
 HIGHLIGHT_REASON_LABELS = {'fastest': 'En hızlı vuruş', 'longest': 'En uzun ral(l)i'}
+LINE_CALL_LABELS = {'in': 'İçeride', 'out': 'Dışarıda', 'belirsiz': 'Belirsiz'}
+
+
+def serve_cell(rally):
+    serve_shot = next((s for s in rally['shots'] if s['is_serve']), None)
+    if serve_shot is None:
+        return '—'
+    return LINE_CALL_LABELS.get(serve_shot['line_call'], 'Evet')
 
 st.set_page_config(page_title='Tenis Video Analizi', page_icon='🎾', layout='centered')
 st.title('🎾 Tenis Video Analizi')
@@ -124,7 +132,7 @@ if st.session_state.results:
                     'Ral(l)i': rally['rally_no'],
                     'Vuruş sayısı': rally['num_shots'],
                     'Süre (s)': round(rally['duration_s'], 1),
-                    'Servis': 'Evet' if any(s['is_serve'] for s in rally['shots']) else '—',
+                    'Servis': serve_cell(rally),
                     'Ort. hız (km/h)': round(rally['avg_speed_kmh']) if rally['avg_speed_kmh'] else None,
                     'Maks. hız (km/h)': round(rally['max_speed_kmh']) if rally['max_speed_kmh'] else None,
                 } for rally in stats['rallies']]
