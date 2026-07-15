@@ -2,6 +2,8 @@ import cv2
 import numpy as np
 from scipy.spatial import distance
 
+import config
+
 
 def line_intersection(line1, line2):
     """
@@ -20,7 +22,7 @@ def line_intersection(line1, line2):
     py = (a * (y3 - y4) - (y1 - y2) * b) / denom
     return (px, py)
 
-def refine_kps(img, x_ct, y_ct, crop_size=40):
+def refine_kps(img, x_ct, y_ct, crop_size=config.REFINE_KPS_CROP_SIZE):
     """
     Snap an approximate court keypoint to the nearest detected line
     intersection within a crop_size window, for sub-pixel-ish refinement.
@@ -58,8 +60,9 @@ def refine_kps(img, x_ct, y_ct, crop_size=40):
 
 def detect_lines(image):
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    gray = cv2.threshold(gray, 155, 255, cv2.THRESH_BINARY)[1]
-    lines = cv2.HoughLinesP(gray, 1, np.pi / 180, 30, minLineLength=10, maxLineGap=30)
+    gray = cv2.threshold(gray, config.LINE_DETECT_BINARY_THRESHOLD, 255, cv2.THRESH_BINARY)[1]
+    lines = cv2.HoughLinesP(gray, 1, np.pi / 180, config.LINE_HOUGH_THRESHOLD,
+                             minLineLength=config.LINE_HOUGH_MIN_LENGTH, maxLineGap=config.LINE_HOUGH_MAX_GAP)
     lines = np.squeeze(lines) 
     if len(lines.shape) > 0:
         if len(lines) == 4 and not isinstance(lines[0], np.ndarray):
@@ -81,7 +84,7 @@ def merge_lines(lines):
                     x3, y3, x4, y4 = s_line
                     dist1 = distance.euclidean((x1, y1), (x3, y3))
                     dist2 = distance.euclidean((x2, y2), (x4, y4))
-                    if dist1 < 20 and dist2 < 20:
+                    if dist1 < config.LINE_MERGE_MAX_DIST and dist2 < config.LINE_MERGE_MAX_DIST:
                         line = np.array([int((x1+x3)/2), int((y1+y3)/2), int((x2+x4)/2), int((y2+y4)/2)])
                         mask[i + j + 1] = False
             new_lines.append(line)  

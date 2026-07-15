@@ -3,6 +3,8 @@ import numpy as np
 import torch
 from tracknet import BallTrackerNet
 from tqdm import tqdm
+
+import config
 from postprocess import refine_kps
 from homography import get_trans_matrix, refer_kps
 
@@ -35,14 +37,15 @@ class CourtDetectorNet():
         points = []
         for kps_num in range(14):
             heatmap = (pred[kps_num]*255).astype(np.uint8)
-            ret, heatmap = cv2.threshold(heatmap, 170, 255, cv2.THRESH_BINARY)
-            circles = cv2.HoughCircles(heatmap, cv2.HOUGH_GRADIENT, dp=1, minDist=20, param1=50, param2=2,
-                                       minRadius=10, maxRadius=25)
+            ret, heatmap = cv2.threshold(heatmap, config.COURT_HEATMAP_THRESHOLD, 255, cv2.THRESH_BINARY)
+            circles = cv2.HoughCircles(heatmap, cv2.HOUGH_GRADIENT, dp=1, minDist=config.COURT_HOUGH_MIN_DIST,
+                                       param1=config.COURT_HOUGH_PARAM1, param2=config.COURT_HOUGH_PARAM2,
+                                       minRadius=config.COURT_HOUGH_MIN_RADIUS, maxRadius=config.COURT_HOUGH_MAX_RADIUS)
             if circles is not None:
                 x_pred = circles[0][0][0]*scale_x
                 y_pred = circles[0][0][1]*scale_y
                 if kps_num not in [8, 12, 9]:
-                    x_pred, y_pred = refine_kps(image, int(y_pred), int(x_pred), crop_size=40)
+                    x_pred, y_pred = refine_kps(image, int(y_pred), int(x_pred), crop_size=config.REFINE_KPS_CROP_SIZE)
                 points.append((x_pred, y_pred))
             else:
                 points.append(None)
@@ -54,7 +57,7 @@ class CourtDetectorNet():
             matrix_trans = cv2.invert(matrix_trans)[1]
         return matrix_trans, points_res
 
-    def infer_model(self, frames, scenes=None, max_probe_frames=5):
+    def infer_model(self, frames, scenes=None, max_probe_frames=config.COURT_MAX_PROBE_FRAMES):
         """ Detect the court homography, reusing one result per scene.
 
         The camera is assumed static within a scene, so the homography barely

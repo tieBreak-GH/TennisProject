@@ -4,6 +4,8 @@ import pandas as pd
 from collections import deque
 from scipy.spatial import distance
 
+import config
+
 
 def _transform_point(point, matrix):
     pt = np.array(point, dtype=np.float32).reshape(1, 1, 2)
@@ -11,7 +13,8 @@ def _transform_point(point, matrix):
     return pt_trans[0, 0]
 
 
-def get_ball_speed(ball_track, homography_matrices, fps, window=5, max_speed_kmh=300, smooth_window=5):
+def get_ball_speed(ball_track, homography_matrices, fps, window=config.BALL_SPEED_WINDOW_FRAMES,
+                    max_speed_kmh=config.BALL_SPEED_MAX_KMH, smooth_window=config.BALL_SPEED_SMOOTH_WINDOW):
     """
     Estimate ball speed (km/h) per frame from court-plane displacement.
     Pixel distance alone is misleading under perspective, so each ball point is

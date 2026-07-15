@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 
+import config
 from court_reference import CourtReference
 
 _court_ref = CourtReference()
@@ -14,7 +15,7 @@ def _to_court_point(point, matrix):
     return pt_trans[0, 0]
 
 
-def _is_near_baseline(court_point, margin_cm=300):
+def _is_near_baseline(court_point, margin_cm=config.SERVE_BASELINE_MARGIN_CM):
     """
     Whether a court-plane point (CourtReference units, ~cm) falls within
     margin_cm of either baseline - used to sanity-check a serve candidate's
@@ -24,7 +25,7 @@ def _is_near_baseline(court_point, margin_cm=300):
     return abs(y - _BASELINE_TOP_Y) <= margin_cm or abs(y - _BASELINE_BOTTOM_Y) <= margin_cm
 
 
-def segment_rallies(ball_track, fps, max_gap_seconds=1.5):
+def segment_rallies(ball_track, fps, max_gap_seconds=config.RALLY_MAX_GAP_SECONDS):
     """
     Split the video into rallies based on gaps in continuous ball tracking.
     A gap longer than max_gap_seconds (no ball detected) is treated as the
@@ -79,7 +80,7 @@ def segment_shots(start, end, bounce_frames):
 
 
 def analyze_rallies(ball_track, bounces, homography_matrices, ball_speed, fps,
-                     max_gap_seconds=1.5, baseline_margin_cm=300):
+                     max_gap_seconds=config.RALLY_MAX_GAP_SECONDS, baseline_margin_cm=config.SERVE_BASELINE_MARGIN_CM):
     """
     Segment the video into rallies and shots, and label each rally's first
     shot as a serve if its starting ball position projects near a baseline.

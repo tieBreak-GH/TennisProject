@@ -4,10 +4,12 @@ import numpy as np
 from scipy.interpolate import CubicSpline
 from scipy.spatial import distance
 
+import config
+
 class BounceDetector:
     def __init__(self, path_model=None):
         self.model = ctb.CatBoostRegressor()
-        self.threshold = 0.45
+        self.threshold = config.BOUNCE_SCORE_THRESHOLD
         if path_model:
             self.load_model(path_model)
         
@@ -70,7 +72,7 @@ class BounceDetector:
                 is_none[num] = 0
                 if x_ball[num+1] is not None:
                     dist = distance.euclidean((x_ext, y_ext), (x_ball[num+1], y_ball[num+1]))
-                    if dist > 80:
+                    if dist > config.BOUNCE_EXTRAPOLATION_MAX_JUMP_PX:
                         x_ball[num+1], y_ball[num+1], is_none[num+1] = None, None, 1
                 counter += 1
             else:

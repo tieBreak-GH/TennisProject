@@ -5,6 +5,8 @@ import numpy as np
 from scipy.spatial import distance
 from tqdm import tqdm
 
+import config
+
 class BallDetector:
     def __init__(self, path_model=None, device='cuda'):
         self.model = BallTrackerNet(input_channels=9, out_channels=256)
@@ -52,7 +54,7 @@ class BallDetector:
             resized_prev = img
         return ball_track
 
-    def postprocess(self, feature_map, prev_pred, scale_x=2, scale_y=2, max_dist=80):
+    def postprocess(self, feature_map, prev_pred, scale_x=2, scale_y=2, max_dist=config.BALL_MAX_JUMP_PX):
         """
         :params
             feature_map: feature map with shape (1,360,640)
@@ -65,9 +67,10 @@ class BallDetector:
         feature_map *= 255
         feature_map = feature_map.reshape((self.height, self.width))
         feature_map = feature_map.astype(np.uint8)
-        ret, heatmap = cv2.threshold(feature_map, 127, 255, cv2.THRESH_BINARY)
-        circles = cv2.HoughCircles(heatmap, cv2.HOUGH_GRADIENT, dp=1, minDist=1, param1=50, param2=2, minRadius=2,
-                                   maxRadius=7)
+        ret, heatmap = cv2.threshold(feature_map, config.BALL_HEATMAP_THRESHOLD, 255, cv2.THRESH_BINARY)
+        circles = cv2.HoughCircles(heatmap, cv2.HOUGH_GRADIENT, dp=1, minDist=config.BALL_HOUGH_MIN_DIST,
+                                   param1=config.BALL_HOUGH_PARAM1, param2=config.BALL_HOUGH_PARAM2,
+                                   minRadius=config.BALL_HOUGH_MIN_RADIUS, maxRadius=config.BALL_HOUGH_MAX_RADIUS)
         x, y = None, None
         if circles is not None:
             if prev_pred[0] is not None:

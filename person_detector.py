@@ -6,6 +6,8 @@ import numpy as np
 from scipy.spatial import distance
 from tqdm import tqdm
 
+import config
+
 class PersonDetector():
     def __init__(self, device='cpu'):
         self.detection_model = YOLO('yolo11n.pt')
@@ -19,7 +21,7 @@ class PersonDetector():
         self.counter_bottom = 0
 
 
-    def detect(self, image, person_min_score=0.85):
+    def detect(self, image, person_min_score=config.PERSON_MIN_SCORE):
         PERSON_CLASS = 0  # COCO "person" class
         results = self.detection_model.predict(image, classes=[PERSON_CLASS], conf=person_min_score,
                                                 device=self.device, verbose=False)[0]
@@ -40,7 +42,7 @@ class PersonDetector():
         # - the top/bottom court-mask filter below does the real work of
         # rejecting non-players (ball kids, officials, crowd), so this can
         # stay low without letting false positives through.
-        bboxes, probs = self.detect(image, person_min_score=0.3)
+        bboxes, probs = self.detect(image, person_min_score=config.PERSON_MIN_SCORE)
         if len(bboxes) > 0:
             person_points = [[int((bbox[2] + bbox[0]) / 2), int(bbox[3])] for bbox in bboxes]
             person_bboxes = list(zip(bboxes, person_points))
