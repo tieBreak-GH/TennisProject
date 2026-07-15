@@ -28,7 +28,10 @@ def _is_near_baseline(court_point, margin_cm=config.SERVE_BASELINE_MARGIN_CM):
     starting position.
     """
     y = court_point[1]
-    return abs(y - _BASELINE_TOP_Y) <= margin_cm or abs(y - _BASELINE_BOTTOM_Y) <= margin_cm
+    # court_point comes from cv2.perspectiveTransform, so y is numpy.float32 -
+    # cast to a native bool, otherwise this leaks into stats['rallies'] as
+    # numpy.bool_, which json.dumps (app.py's JSON export) can't serialize
+    return bool(abs(y - _BASELINE_TOP_Y) <= margin_cm or abs(y - _BASELINE_BOTTOM_Y) <= margin_cm)
 
 
 def _target_service_box(serve_x, serve_baseline):
