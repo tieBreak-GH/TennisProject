@@ -25,7 +25,7 @@ PERSON_MIN_SCORE = 0.3
 # -- Ball speed estimation (speed_estimator.py) --
 BALL_SPEED_WINDOW_FRAMES = 5    # max frame gap used as the speed baseline
 BALL_SPEED_MAX_KMH = 300        # outlier guard: speeds above this are dropped
-BALL_SPEED_SMOOTH_WINDOW = 5    # rolling median window to reduce jitter
+BALL_SPEED_SMOOTH_WINDOW = 9    # rolling median window to reduce jitter
 
 # -- Ball tracking (ball_detector.py) --
 BALL_MAX_JUMP_PX = 80  # postprocess: max distance from the previous ball
