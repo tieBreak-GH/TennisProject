@@ -1,0 +1,5 @@
+[server]
+# Telefon kamerasıyla çekilen birkaç dakikalık 1080p videolar 200MB
+# varsayılanını kolayca aşabiliyor (bkz. docs/comparison_report.md §5).
+maxUploadSize = 1024
+maxMessageSize = 1024

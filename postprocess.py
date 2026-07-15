@@ -21,8 +21,19 @@ def line_intersection(line1, line2):
     return (px, py)
 
 def refine_kps(img, x_ct, y_ct, crop_size=40):
+    """
+    Snap an approximate court keypoint to the nearest detected line
+    intersection within a crop_size window, for sub-pixel-ish refinement.
+
+    Axis note (source of past confusion, kept as-is since court_detection_net
+    calls it consistently with this convention): despite the names, x_ct is
+    the row index (used against img_height) and y_ct is the column index
+    (used against img_width) - i.e. the caller passes (row, col), not
+    (x, y). The return value is (col, row), i.e. (x, y) in image terms, which
+    is why the caller does `x_pred, y_pred = refine_kps(image, int(y_pred), int(x_pred), ...)`.
+    """
     refined_x_ct, refined_y_ct = x_ct, y_ct
-    
+
     img_height, img_width = img.shape[:2]
     x_min = max(x_ct-crop_size, 0)
     x_max = min(img_height, x_ct+crop_size)

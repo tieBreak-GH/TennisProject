@@ -15,7 +15,9 @@ import torch
 
 def read_video(path_video):
     cap = cv2.VideoCapture(path_video)
-    fps = int(cap.get(cv2.CAP_PROP_FPS))
+    # Keep fps as a float: truncating e.g. 29.97 to 29 drifts audio/timestamp
+    # sync over long videos and skews the speed-chart time axis in app.py.
+    fps = cap.get(cv2.CAP_PROP_FPS)
     frames = []
     while cap.isOpened():
         ret, frame = cap.read()
@@ -33,8 +35,8 @@ def get_court_img():
     court_img = (np.stack((court, court, court), axis=2)*255).astype(np.uint8)
     return court_img
 
-def main(frames, scenes, bounces, ball_track, homography_matrices, kps_court, persons_top, persons_bottom,
-         ball_speed=None, shot_max_speed=None, serve_frames=None, draw_trace=False, trace=7):
+def render_output(frames, scenes, bounces, ball_track, homography_matrices, kps_court, persons_top, persons_bottom,
+                   ball_speed=None, shot_max_speed=None, serve_frames=None, draw_trace=False, trace=7):
     """
     :params
         frames: list of original images
@@ -73,7 +75,10 @@ def main(frames, scenes, bounces, ball_track, homography_matrices, kps_court, pe
             court_img = get_court_img()
 
             for i in range(scenes[num_scene][0], scenes[num_scene][1]):
-                img_res = frames[i]
+                # copy, not a view: cv2 draw calls below mutate their first
+                # arg in place, and frames[i] must stay untouched (write_
+                # highlights/write_rallies_only re-slice imgs_res, not frames)
+                img_res = frames[i].copy()
                 inv_mat = homography_matrices[i]
 
                 # draw ball trajectory
@@ -84,7 +89,7 @@ def main(frames, scenes, bounces, ball_track, homography_matrices, kps_court, pe
                                 if ball_track[i-j][0] is not None:
                                     draw_x = int(ball_track[i-j][0])
                                     draw_y = int(ball_track[i-j][1])
-                                    img_res = cv2.circle(frames[i], (draw_x, draw_y),
+                                    img_res = cv2.circle(img_res, (draw_x, draw_y),
                                     radius=3, color=(0, 255, 0), thickness=2)
                     else:    
                         img_res = cv2.circle(img_res , (int(ball_track[i][0]), int(ball_track[i][1])), radius=5,
@@ -170,7 +175,10 @@ def main(frames, scenes, bounces, ball_track, homography_matrices, kps_court, pe
  
 def write(imgs_res, fps, path_output_video):
     height, width = imgs_res[0].shape[:2]
-    out = cv2.VideoWriter(path_output_video, cv2.VideoWriter_fourcc(*'DIVX'), fps, (width, height))
+    # avc1 (H.264) instead of DIVX (MPEG-4 Part 2): browsers, including
+    # Chrome desktop and mobile, cannot play DIVX/FMP4 in an HTML5 <video>
+    # element, which broke the web UI's video preview.
+    out = cv2.VideoWriter(path_output_video, cv2.VideoWriter_fourcc(*'avc1'), fps, (width, height))
     for num in range(len(imgs_res)):
         frame = imgs_res[num]
         out.write(frame)
@@ -183,7 +191,7 @@ def write_highlights(imgs_res, highlights, fps, output_dir):
     as its own short clip, reusing the already-rendered frames (ball/court/
     speed overlays included) - no re-inference needed.
     :params
-        imgs_res: list of rendered frames, as returned by main()
+        imgs_res: list of rendered frames, as returned by render_output()
         highlights: list of {rally, reasons} dicts from select_highlights
         fps: video frame rate
         output_dir: directory to write clips into (created if missing)
@@ -202,6 +210,30 @@ def write_highlights(imgs_res, highlights, fps, output_dir):
         write(frames, fps, path)
         clips.append({'rally_no': rally['rally_no'], 'reasons': h['reasons'], 'path': path})
     return clips
+
+
+def write_rallies_only(imgs_res, rallies, fps, path_output_video):
+    """
+    Concatenate just the rally windows, in chronological order, into a single
+    video - skips the "dead time" between points (changeovers, ball pickup,
+    etc.), the same trim SwingVision applies to shrink a full match into a
+    much shorter watch. Reuses the already-rendered frames, no re-inference.
+    :params
+        imgs_res: list of rendered frames, as returned by render_output()
+        rallies: list of rally dicts (analyze_rallies output; rally_no order
+            is already start_frame-ascending)
+        fps: video frame rate
+        path_output_video: output path
+    :return
+        path_output_video if at least one rally produced frames, else None
+    """
+    frames = []
+    for rally in rallies:
+        frames.extend(imgs_res[rally['start_frame']:rally['end_frame']])
+    if not frames:
+        return None
+    write(frames, fps, path_output_video)
+    return path_output_video
 
 
 def _select_device(prefer_alt_gpu=True):
@@ -230,7 +262,8 @@ def _select_device(prefer_alt_gpu=True):
 def process_video(path_ball_track_model, path_court_model, path_bounce_model,
                    path_input_video, path_output_video, draw_trace=True, device=None,
                    detect_persons=True, progress_callback=None,
-                   generate_highlights=False, highlights_dir=None, highlights_top_n=3):
+                   generate_highlights=False, highlights_dir=None, highlights_top_n=3,
+                   trim_dead_time=False, rallies_only_path=None):
     """
     Run the full analysis pipeline on a video and write the annotated result.
     :params
@@ -250,6 +283,11 @@ def process_video(path_ball_track_model, path_court_model, path_bounce_model,
         highlights_dir: directory to write highlight clips into, or None to
             use a 'highlights' subfolder next to path_output_video.
         highlights_top_n: how many rallies to pick per highlight criterion.
+        trim_dead_time: whether to also write a single video that
+            concatenates only the rally windows (see write_rallies_only),
+            skipping the non-rally "dead time" between points.
+        rallies_only_path: output path for the dead-time-trimmed video, or
+            None to use 'rallies_only.mp4' next to path_output_video.
     :return
         stats: dict summary (frame count, fps, bounce count, ball speed min/max/avg, devices used)
     """
@@ -309,12 +347,19 @@ def process_video(path_ball_track_model, path_court_model, path_bounce_model,
                 serve_frames.update(range(s['start_frame'], s['end_frame']))
 
     report('video oluşturuluyor', 0.78)
-    imgs_res = main(frames, scenes, bounces, ball_track, homography_matrices, kps_court, persons_top, persons_bottom,
+    imgs_res = render_output(frames, scenes, bounces, ball_track, homography_matrices, kps_court, persons_top, persons_bottom,
                     ball_speed=ball_speed, shot_max_speed=shot_max_speed, serve_frames=serve_frames,
                     draw_trace=draw_trace)
 
-    report('video yazılıyor', 0.92)
+    report('video yazılıyor', 0.90)
     write(imgs_res, fps, path_output_video)
+
+    rallies_only_video = None
+    if trim_dead_time:
+        report('ölü zaman kırpılıyor', 0.94)
+        out_path = rallies_only_path or os.path.join(
+            os.path.dirname(os.path.abspath(path_output_video)), 'rallies_only.mp4')
+        rallies_only_video = write_rallies_only(imgs_res, rallies, fps, out_path)
 
     highlight_clips = []
     if generate_highlights:
@@ -330,7 +375,9 @@ def process_video(path_ball_track_model, path_court_model, path_bounce_model,
         'num_bounces': len(bounces),
         'num_rallies': len(rallies),
         'rallies': rallies,
+        'ball_speed': ball_speed,
         'highlight_clips': highlight_clips,
+        'rallies_only_video': rallies_only_video,
         'max_speed_kmh': max(valid_speeds) if valid_speeds else None,
         'avg_speed_kmh': (sum(valid_speeds) / len(valid_speeds)) if valid_speeds else None,
         'ball_court_device': ball_court_device,

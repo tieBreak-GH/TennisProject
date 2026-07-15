@@ -1,3 +1,4 @@
+import json
 import os
 import tempfile
 
@@ -55,6 +56,9 @@ if generate_highlights:
     highlights_top_n = st.slider('Kriter başına klip sayısı', min_value=1, max_value=5, value=3,
                                   help='Örn. 3 seçilirse en fazla 3 "en hızlı vuruşlu" ve 3 "en uzun ral(l)i" klibi '
                                        'kesilir (aynı ral(l)i iki kritere de girebilir).')
+trim_dead_time = st.checkbox('Ölü zamanı kırp (sadece ral(l)iler)', value=False,
+                              help='Ral(l)i olmayan bölümleri (top değişimi, servis öncesi bekleme vb.) atlayıp '
+                                   'sadece oyun anlarını içeren tek bir video oluşturur.')
 
 if uploaded_files and st.button('Analiz Et', type='primary'):
     overall_status = st.empty()
@@ -81,7 +85,8 @@ if uploaded_files and st.button('Analiz Et', type='primary'):
                                    detect_persons=detect_persons,
                                    progress_callback=on_progress,
                                    generate_highlights=generate_highlights,
-                                   highlights_top_n=highlights_top_n)
+                                   highlights_top_n=highlights_top_n,
+                                   trim_dead_time=trim_dead_time)
             results.append({'name': uploaded_file.name, 'output_path': output_path, 'stats': stats, 'error': None})
         except Exception as e:
             results.append({'name': uploaded_file.name, 'output_path': None, 'stats': None, 'error': str(e)})
@@ -123,13 +128,40 @@ if st.session_state.results:
                     'Ort. hız (km/h)': round(rally['avg_speed_kmh']) if rally['avg_speed_kmh'] else None,
                     'Maks. hız (km/h)': round(rally['max_speed_kmh']) if rally['max_speed_kmh'] else None,
                 } for rally in stats['rallies']]
-                st.dataframe(pd.DataFrame(rally_rows), hide_index=True, use_container_width=True)
+                rally_df = pd.DataFrame(rally_rows)
+                st.dataframe(rally_df, hide_index=True, use_container_width=True)
+
+                export_col1, export_col2 = st.columns(2)
+                export_col1.download_button(
+                    'Ral(l)i verisini CSV indir', rally_df.to_csv(index=False).encode('utf-8'),
+                    file_name='rallyler_{}.csv'.format(idx + 1), mime='text/csv',
+                    key='dl_csv_{}'.format(idx))
+                export_col2.download_button(
+                    'Tüm istatistikleri JSON indir', json.dumps(stats, indent=2, ensure_ascii=False).encode('utf-8'),
+                    file_name='istatistikler_{}.json'.format(idx + 1), mime='application/json',
+                    key='dl_json_{}'.format(idx))
+
+            if stats.get('ball_speed'):
+                speed_df = pd.DataFrame({
+                    'Zaman (s)': [i / stats['fps'] for i in range(len(stats['ball_speed']))],
+                    'Hız (km/h)': stats['ball_speed'],
+                }).dropna()
+                if not speed_df.empty:
+                    st.subheader('Top hızı (zaman içinde)')
+                    st.line_chart(speed_df.set_index('Zaman (s)'))
 
             st.video(r['output_path'])
 
             with open(r['output_path'], 'rb') as f:
                 st.download_button('Videoyu indir', f, file_name='tenis_analiz_{}.mp4'.format(idx + 1),
                                     mime='video/mp4', key='dl_video_{}'.format(idx))
+
+            if stats.get('rallies_only_video') and os.path.isfile(stats['rallies_only_video']):
+                st.subheader('Sadece ral(l)iler (ölü zaman kırpılmış)')
+                st.video(stats['rallies_only_video'])
+                with open(stats['rallies_only_video'], 'rb') as f:
+                    st.download_button('Bu videoyu indir', f, file_name='sadece_rallyler_{}.mp4'.format(idx + 1),
+                                        mime='video/mp4', key='dl_rallies_only_{}'.format(idx))
 
             if stats.get('highlight_clips'):
                 st.subheader('Highlight klipleri')
