@@ -13,7 +13,7 @@ You can check this blog post https://medium.com/@kosolapov.aetp/tennis-analysis-
 - **Bounce detection**: a CatBoostRegressor predicts bounces from the ball's trajectory. Pretrained weights: [bounce_model.cbm](https://drive.google.com/file/d/1Eo5HDnAQE8y_FbOftKZ8pjiojwuy2BmJ/view?usp=drive_link)
 
 - **Player detection**: YOLO11n locates the top/bottom players and projects them onto a minimap.
-- **Ball speed**: each ball position is projected into real-world court coordinates (cm) via the court homography, giving an instantaneous speed (km/h) next to the ball plus a stable "peak speed of the current shot" HUD. Requires the court to be visible/tracked in frame.
+- **Ball speed**: each ball position is projected into real-world court coordinates (cm) via the court homography, giving an instantaneous speed (km/h) next to the ball plus a stable "peak speed of the current shot" HUD. Requires the court to be visible/tracked in frame. **Accuracy depends on camera height**: this projection assumes the ball is on the ground plane, so a low/close camera (e.g. a 1.5-2.5m tripod) systematically overstates speed — mount the camera as high and as far back as practical (see `docs/mimari_fizik_gpu_degerlendirme.md` §3 for the underlying geometry and a fix already planned in `docs/uygulama_plani.md`).
 - **Rally & serve segmentation**: the video is split into rallies and shots from ball-tracking gaps and bounces; each rally's first shot is labeled a serve if it starts near a baseline.
 - **Estimated serve line calling**: each serve gets an estimated **in / out / uncertain** call against its target service box (singles lines), derived purely from the existing homography + bounce detection — no extra model. Deliberately scoped to serves only and shown as an *estimate* (an "uncertain" band near the lines), since bounce-frame precision and homography error make a hard verdict unreliable. See `rally_analyzer.py` and `docs/development_plan.md` (Mantık §7) for the geometry and the accuracy caveats.
 - **Highlights & dead-time trim**: auto-cut short clips for the fastest shots / longest rallies, and/or a single video with only rally windows (dead time between points removed) — both written inline during rendering, no extra decode pass.
@@ -38,6 +38,25 @@ For a one-click launch (creates/activates the virtual environment, installs requ
 - **Apple Silicon (MPS)**: used automatically for ball/court/person detection when available.
 - **AMD/Intel/NVIDIA on Windows (DirectML)**: optional, unverified — install `pip install torch-directml` yourself and the code will pick it up automatically for all three models. This package is experimental and its last release may not match the `torch` version pinned in `requirements.txt`, so it isn't installed by default; test compatibility in your own environment.
 - Player detection uses YOLO (`ultralytics`) and shares the same device selection as ball/court detection — benchmarked at ~11ms/frame on MPS vs ~16ms/frame on CPU (Apple M-series), so no MPS performance pit like the old Faster R-CNN detector had.
+
+### AMD Windows GPU setup (e.g. RX 9070 XT)
+
+`pip install -r requirements.txt` on Windows pulls the **CPU-only** PyTorch wheel by default (there's no Windows CUDA/ROCm wheel on PyPI) — the pipeline will silently run on CPU even with a capable AMD card installed. Check what's actually being used:
+```bash
+python check_gpu.py
+```
+This prints the detected torch build, which backend `main._select_device` would pick, and a CPU-vs-GPU ms/frame benchmark (no model weights needed). If it reports a CPU-only build, pick one of:
+
+1. **`torch-directml` (easiest)** — works with any DX12-capable AMD/Intel/NVIDIA GPU on Windows natively, no dual-boot or WSL required:
+   ```bash
+   pip install torch-directml
+   ```
+   Re-run `python check_gpu.py` to confirm the card is detected. This package is experimental and may pin an older `torch` version than `requirements.txt` (see the bullet above) — recent GPU generations (e.g. RDNA4) aren't guaranteed to be validated against it yet, so verify output correctness against a known-good CPU run before trusting results.
+2. **WSL2 + ROCm (better performance, more setup)** — install WSL2 with GPU passthrough, then a ROCm build of PyTorch inside it (`--index-url` per https://pytorch.org; RDNA4/gfx1201 needs ROCm ≥ 6.4). Once installed, the Linux ROCm path above applies unchanged.
+
+No code changes are needed for either path — `main._select_device` already tries DirectML/ROCm/MPS before falling back to CPU. The web UI's "İşlem birimi" (processing device) selector lets you force CPU if an experimental GPU backend misbehaves, without editing any files; the results panel always shows which device actually ran.
+
+Note: GPU acceleration only speeds up **model inference** (ball/court/player detection - the actual bottleneck). Video decode/encode (OpenCV/FFmpeg) always runs on CPU regardless of backend.
 
 ## Configuration
 Tunable thresholds (confidence scores, Hough parameters, rally-gap/baseline margins, the serve line-calling margin, etc.) live in one place, `config.py`, each documented with what it controls. Pretrained-model input shapes (e.g. the 640×360 ball/court model resolution) are deliberately *not* there — changing those without retraining would silently break the model.

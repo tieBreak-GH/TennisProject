@@ -111,6 +111,11 @@ if missing_models:
 with st.expander('Video çekim önerileri'):
     st.markdown(
         '- Kamera sabit olmalı (tripod veya sabit bir yere yerleştirin).\n'
+        '- Kamerayı **olabildiğince yüksek ve geride** konumlandırın (ör. baseline arkası, '
+        'yükseltilmiş bir yere). Top hızı, topun görüntüdeki konumunun saha zeminine '
+        'projeksiyonundan hesaplanır; alçak bir kamera (ör. 1.5-2.5 m tripod) bu yüzden '
+        'hızı sistematik olarak **abartır** — kamera ne kadar yüksekteyse ölçüm o kadar '
+        'gerçeğe yakın olur.\n'
         '- Yatay (landscape) çekin, saha bütünüyle kadrajda olsun.\n'
         '- Kısa ralli klipleri, uzun maç kayıtlarından çok daha hızlı işlenir.\n'
         '- GPU yoksa (CPU üzerinde) işlem birkaç dakika ile onlarca dakika arası sürebilir.'
@@ -128,9 +133,30 @@ def format_eta(seconds):
 if 'results' not in st.session_state:
     st.session_state.results = []
 
+_DEVICE_LABELS = ['Otomatik', 'CPU (garantili)', 'GPU (CUDA/DirectML/ROCm/MPS dene)']
+
+
+def _device_for_choice(label):
+    """
+    Map the radio label to main.process_video's `device` param.
+    'Otomatik' and 'GPU dene' both resolve to None (main._select_device
+    already tries a GPU backend first and falls back to CPU on its own) -
+    the separate 'GPU' option exists so a non-technical user can see and
+    pick that intent explicitly, not because it takes a different code path.
+    Only 'CPU' forces a specific device, overriding GPU auto-detection.
+    """
+    return 'cpu' if label.startswith('CPU') else None
+
+
 with st.form('analiz_formu'):
     uploaded_files = st.file_uploader('Video yükleyin (birden fazla seçebilirsiniz)',
                                        type=['mp4', 'mov', 'm4v', 'avi'], accept_multiple_files=True)
+    device_label = st.radio('İşlem birimi', _DEVICE_LABELS, horizontal=True,
+                             help='"Otomatik" mevcut en iyi cihazı dener (GPU varsa onu, yoksa CPU). '
+                                  '"CPU" her zaman CPU kullanır - GPU sürücüsü/backend deneyseyse (ör. '
+                                  'DirectML) sorun çıkarsa buraya alın. "GPU" bir GPU backend\'i zorlar; '
+                                  'bulunamazsa yine CPU\'ya düşer. Sonuç panelinde hangi cihazın '
+                                  'kullanıldığı gösterilir.')
     detect_persons = st.checkbox('Oyuncuları tespit et', value=True,
                                   help='Kapatırsanız en ağır model (oyuncu tespiti) atlanır, işlem belirgin şekilde hızlanır; '
                                        'ama oyuncu kutuları ve minimap noktaları oluşmaz.')
@@ -174,6 +200,7 @@ if submitted and uploaded_files:
         try:
             stats = process_video(BALL_MODEL, COURT_MODEL, BOUNCE_MODEL,
                                    input_path, output_path,
+                                   device=_device_for_choice(device_label),
                                    detect_persons=detect_persons,
                                    progress_callback=on_progress,
                                    generate_highlights=generate_highlights,
