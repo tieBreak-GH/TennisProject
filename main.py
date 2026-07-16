@@ -145,7 +145,15 @@ def _open_writer(path, fps, width, height):
     # avc1 (H.264) instead of DIVX (MPEG-4 Part 2): browsers, including
     # Chrome desktop and mobile, cannot play DIVX/FMP4 in an HTML5 <video>
     # element, which broke the web UI's video preview.
-    return cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*'avc1'), fps, (width, height))
+    writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*'avc1'), fps, (width, height))
+    if not writer.isOpened():
+        # cv2.VideoWriter doesn't raise on a missing/broken encoder - it
+        # silently produces an empty or corrupt file instead, which then
+        # surfaces much later as a confusing "video won't play" report.
+        raise RuntimeError(
+            "Video yazici acilamadi (avc1/H.264 codec). OpenCV/FFmpeg "
+            "kurulumunuzda H.264 encoder eksik olabilir. Hedef dosya: {}".format(path))
+    return writer
 
 
 def analyze_streaming(path_input_video, ball_detector, court_detector, person_detector,
