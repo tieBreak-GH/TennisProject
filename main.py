@@ -6,7 +6,7 @@ from court_reference import CourtReference
 from bounce_detector import BounceDetector
 from person_detector import PersonDetector
 from ball_detector import BallDetector
-from speed_estimator import get_ball_speed, get_shot_max_speed
+from speed_estimator import estimate_ball_speed, get_shot_max_speed
 from rally_analyzer import analyze_rallies, select_highlights
 from utils import SceneCutDetector, ThreadedFrameReader, ThreadedFrameWriter
 import argparse
@@ -184,7 +184,7 @@ def analyze_streaming(path_input_video, ball_detector, court_detector, person_de
     decoding frame i+1 overlaps with running the ball/court/person models on
     frame i, instead of the two taking turns.
     :return
-        (ball_track, homography_matrices, kps_court, persons_top, persons_bottom, fps, num_frames, scenes)
+        (ball_track, homography_matrices, kps_court, persons_top, persons_bottom, fps, num_frames, scenes, image_size)
     """
     reader = ThreadedFrameReader(path_input_video)
     fps = reader.fps
@@ -194,6 +194,7 @@ def analyze_streaming(path_input_video, ball_detector, court_detector, person_de
     ball_window = []
     ball_prev_pred = [None, None]
     ball_scale_x = ball_scale_y = None
+    image_size = None
 
     court_width, court_height = 640, 360
     court_scale_x = court_scale_y = None
@@ -239,6 +240,7 @@ def analyze_streaming(path_input_video, ball_detector, court_detector, person_de
         for frame in reader:
             if ball_scale_x is None:
                 orig_height, orig_width = frame.shape[:2]
+                image_size = (orig_width, orig_height)
                 ball_scale_x = orig_width / ball_detector.width
                 ball_scale_y = orig_height / ball_detector.height
                 court_scale_x = orig_width / court_width
@@ -295,7 +297,7 @@ def analyze_streaming(path_input_video, ball_detector, court_detector, person_de
     finally:
         reader.close()
 
-    return ball_track, homography_matrices, kps_court, persons_top, persons_bottom, fps, i, scenes
+    return ball_track, homography_matrices, kps_court, persons_top, persons_bottom, fps, i, scenes, image_size
 
 
 def render_streaming(path_input_video, path_output_video, scenes, bounces, ball_track, homography_matrices,
@@ -513,7 +515,7 @@ def process_video(path_ball_track_model, path_court_model, path_bounce_model,
     person_detector = PersonDetector(person_device) if detect_persons else None
 
     report('video analiz ediliyor ({})'.format(ball_court_device), 0.02)
-    ball_track, homography_matrices, kps_court, persons_top, persons_bottom, fps, num_frames, scenes = analyze_streaming(
+    ball_track, homography_matrices, kps_court, persons_top, persons_bottom, fps, num_frames, scenes, image_size = analyze_streaming(
         path_input_video, ball_detector, court_detector, person_detector, detect_persons,
         _infer_batch_size(ball_court_device, config.BALL_INFER_BATCH_SIZE),
         _infer_batch_size(person_device, config.PERSON_INFER_BATCH_SIZE),
@@ -525,7 +527,8 @@ def process_video(path_ball_track_model, path_court_model, path_bounce_model,
     y_ball = [x[1] for x in ball_track]
     bounces = bounce_detector.predict(x_ball, y_ball)
 
-    ball_speed = get_ball_speed(ball_track, homography_matrices, fps, bounces)
+    ball_speed, speed_method, camera_height_cm = estimate_ball_speed(
+        ball_track, homography_matrices, scenes, fps, bounces, image_size)
     shot_max_speed = get_shot_max_speed(ball_speed, bounces)
 
     rallies = analyze_rallies(ball_track, bounces, homography_matrices, ball_speed, fps)
@@ -545,6 +548,9 @@ def process_video(path_ball_track_model, path_court_model, path_bounce_model,
         rallies_only_path, report)
 
     valid_speeds = [s for s in ball_speed if s is not None]
+    num_3d = sum(1 for m in speed_method if m == '3d')
+    num_2d = sum(1 for m in speed_method if m == '2d')
+    heights_3d = [h for h, m in zip(camera_height_cm, speed_method) if m == '3d' and h is not None]
     stats = {
         'num_frames': num_frames,
         'fps': fps,
@@ -558,6 +564,14 @@ def process_video(path_ball_track_model, path_court_model, path_bounce_model,
         'avg_speed_kmh': (sum(valid_speeds) / len(valid_speeds)) if valid_speeds else None,
         'ball_court_device': ball_court_device,
         'person_device': person_device if detect_persons else None,
+        # Faz 4: which per-frame speed came from the camera-height-independent
+        # 3D fit vs. the legacy 2D ground-projection fallback (see
+        # speed_estimator.estimate_ball_speed) - 'speed_method' is aligned
+        # with ball_speed; the rest are summaries for a UI badge.
+        'speed_method': speed_method,
+        'num_frames_3d': num_3d,
+        'num_frames_2d': num_2d,
+        'camera_height_cm': (sum(heights_3d) / len(heights_3d)) if heights_3d else None,
     }
     report('tamamlandı', 1.0)
     return stats

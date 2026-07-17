@@ -5,6 +5,8 @@ from collections import deque
 from scipy.spatial import distance
 
 import config
+from camera_calib import estimate_focal, decompose_pose
+from trajectory_3d import fit_segment_trajectory, segment_speed_series, is_reliable_fit
 
 
 def _transform_point(point, matrix):
@@ -79,6 +81,154 @@ def get_ball_speed(ball_track, homography_matrices, fps, bounce_frames=(), windo
 
     smoothed = pd.Series(raw_speeds).rolling(smooth_window, min_periods=1, center=True).median()
     return [None if pd.isna(x) else float(x) for x in smoothed]
+
+
+def _bounce_segments(n, bounce_frames):
+    """
+    (start, end) bounce-to-bounce segments partitioning [0, n) - same boundary
+    semantics as _segment_start_per_frame/get_shot_max_speed (a bounce frame
+    starts the next segment, not ends the current one).
+    """
+    boundaries = sorted(b for b in set(bounce_frames) if 0 <= b <= n)
+    segments = []
+    start = 0
+    for b in boundaries:
+        if b > start:
+            segments.append((start, b))
+        start = b
+    segments.append((start, n))
+    return segments
+
+
+def get_ball_speed_3d(ball_track, homography_matrices, scenes, fps, bounce_frames, image_size):
+    """
+    Camera-height-independent per-frame ball speed (km/h), fit from the
+    ball's actual 3D flight path instead of speed_estimator.get_ball_speed's
+    ground-plane projection (see docs/mimari_fizik_gpu_degerlendirme.md §3
+    for why the latter is systematically wrong for an airborne point, by an
+    amount that grows as the camera gets lower).
+
+    For each scene, the court homography (constant per scene - same
+    assumption analyze_streaming already makes) yields a camera calibration
+    (camera_calib.estimate_focal + decompose_pose) once; each bounce-to-bounce
+    segment within that scene is then fit independently
+    (trajectory_3d.fit_segment_trajectory) from its ball pixel detections.
+    A segment's result is used only where trajectory_3d.is_reliable_fit says
+    so - otherwise those frames are left None so the caller (estimate_ball_speed)
+    falls back to the 2D method for them.
+    :params
+        ball_track: list of (x, y) ball pixel coordinates per frame
+        homography_matrices: list of image->court homography matrices per
+            frame (None where no court was found), as returned by
+            main.analyze_streaming - constant within each scene
+        scenes: list of (start, end) frame ranges, as returned by
+            main.analyze_streaming
+        fps: video frame rate
+        bounce_frames: iterable of frame indices where the ball bounces
+        image_size: (width, height) of the video frames, in pixels
+    :return
+        (speeds_3d, camera_height_cm): both lists aligned with ball_track.
+        speeds_3d[i] is the 3D-fit speed (km/h) at frame i, or None where no
+        reliable fit was available. camera_height_cm[i] is that frame's
+        scene's recovered camera height (cm), or None if calibration failed
+        for that scene - informational (e.g. for a UI caption), independent
+        of whether any segment in that scene had a reliable fit.
+    """
+    n = len(ball_track)
+    speeds_3d = [None] * n
+    camera_height_cm = [None] * n
+    if not image_size or image_size[0] <= 0 or image_size[1] <= 0:
+        return speeds_3d, camera_height_cm
+    segments = _bounce_segments(n, bounce_frames)
+
+    for scene_start, scene_end in scenes:
+        scene_end = min(scene_end, n)
+        if scene_end <= scene_start:
+            continue
+        H_i2c = homography_matrices[scene_start]
+        if H_i2c is None:
+            continue
+        H_c2i = np.linalg.inv(H_i2c)
+        focal = estimate_focal(H_c2i, image_size)
+        if focal is None:
+            continue
+        K = np.array([[focal, 0, image_size[0] / 2],
+                      [0, focal, image_size[1] / 2],
+                      [0, 0, 1]])
+        R, t, C = decompose_pose(H_c2i, K)
+        if R is None:
+            continue
+
+        height_cm = float(C[2])
+        for i in range(scene_start, scene_end):
+            camera_height_cm[i] = height_cm
+
+        for seg_start, seg_end in segments:
+            s, e = max(seg_start, scene_start), min(seg_end, scene_end)
+            if e - s < 3:
+                continue
+            idxs = [i for i in range(s, e) if ball_track[i][0] is not None]
+            if len(idxs) < 3:
+                continue
+
+            times = np.array([i / fps for i in idxs])
+            pixel_coords = np.array([ball_track[i] for i in idxs])
+            fit = fit_segment_trajectory(times, pixel_coords, K, R, t, C)
+            if not is_reliable_fit(fit):
+                continue
+
+            speeds = segment_speed_series(fit['v0'], times, t0=times[0])
+            for idx, speed in zip(idxs, speeds):
+                speeds_3d[idx] = float(speed)
+
+    return speeds_3d, camera_height_cm
+
+
+def estimate_ball_speed(ball_track, homography_matrices, scenes, fps, bounce_frames, image_size,
+                         method='auto', window=config.BALL_SPEED_WINDOW_FRAMES,
+                         max_speed_kmh=config.BALL_SPEED_MAX_KMH, smooth_window=config.BALL_SPEED_SMOOTH_WINDOW):
+    """
+    Dispatcher: per-frame ball speed (km/h) from the 3D method where
+    reliable, falling back to the legacy 2D ground-projection method
+    (get_ball_speed) everywhere else. Both methods end up bounded by a
+    physical speed ceiling (2D via its own max_speed_kmh; 3D via
+    trajectory_3d.is_reliable_fit's max_speed_kmh gate) - real broadcast
+    footage (Faz 5.1) showed the 3D fit's covariance-based confidence alone
+    is not enough to catch every bad fit (see is_reliable_fit's docstring),
+    so a plausibility ceiling is required for it too, not just 2D's
+    ground-projection magnification error.
+    :params
+        method: 'auto' (3D where reliable, 2D fallback elsewhere - the
+            normal mode), '2d' (force the legacy method everywhere), '3d'
+            (3D only - frames without a reliable fit are left None, no 2D
+            fallback; mainly useful for the height-invariance validation)
+        (other params: see get_ball_speed / get_ball_speed_3d)
+    :return
+        (speeds, method_per_frame, camera_height_cm): all lists aligned with
+        ball_track. method_per_frame[i] is '3d', '2d', or None (no speed
+        available). camera_height_cm as returned by get_ball_speed_3d.
+    """
+    n = len(ball_track)
+
+    speeds_3d, camera_height_cm = (
+        get_ball_speed_3d(ball_track, homography_matrices, scenes, fps, bounce_frames, image_size)
+        if method != '2d' else ([None] * n, [None] * n))
+    speeds_2d = (
+        get_ball_speed(ball_track, homography_matrices, fps, bounce_frames,
+                        window=window, max_speed_kmh=max_speed_kmh, smooth_window=smooth_window)
+        if method != '3d' else [None] * n)
+
+    speeds = [None] * n
+    method_per_frame = [None] * n
+    for i in range(n):
+        if speeds_3d[i] is not None:
+            speeds[i] = speeds_3d[i]
+            method_per_frame[i] = '3d'
+        elif speeds_2d[i] is not None:
+            speeds[i] = speeds_2d[i]
+            method_per_frame[i] = '2d'
+
+    return speeds, method_per_frame, camera_height_cm
 
 
 def get_shot_max_speed(ball_speed, bounce_frames):

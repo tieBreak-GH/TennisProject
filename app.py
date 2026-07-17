@@ -239,6 +239,27 @@ if st.session_state.results:
                 device_note += ' · Oyuncu tespiti: {}'.format(stats['person_device'])
             st.caption(device_note)
 
+            # Faz 4: hangi karelerin kamera-yüksekliğinden bağımsız 3B
+            # yörünge fitine mi, yoksa eski 2B saha-düzlemi projeksiyonuna mı
+            # dayandığını göster - bkz. speed_estimator.estimate_ball_speed.
+            num_3d = stats.get('num_frames_3d', 0)
+            num_2d = stats.get('num_frames_2d', 0)
+            total_method = num_3d + num_2d
+            if total_method:
+                pct_3d = round(100 * num_3d / total_method)
+                if num_3d and num_2d:
+                    st.info('Hız yöntemi: karelerin %{}\'i 3B kalibre (kamera ≈ {:.1f} m), '
+                            'kalanı 2B tahmin (düşük güven).'.format(
+                                pct_3d, stats['camera_height_cm'] / 100))
+                elif num_3d:
+                    st.success('Hız yöntemi: 3B kalibre — kamera-yüksekliğinden bağımsız '
+                                '(kamera ≈ {:.1f} m).'.format(stats['camera_height_cm'] / 100))
+                else:
+                    st.warning('Hız yöntemi: 2B tahmin (düşük güven) — 3B kalibrasyon bu videoda '
+                                'devreye giremedi (saha net görünmüyor, uçuş segmentleri çok kısa, '
+                                'veya homografi dejenere). Farklı kamera yüksekliklerinde hız bu '
+                                'videoda daha az güvenilir olabilir.')
+
             if stats.get('rallies'):
                 st.subheader('Ral(l)iler')
                 rally_rows = [{
@@ -270,6 +291,9 @@ if st.session_state.results:
                 if not speed_df.empty:
                     st.subheader('Top hızı (zaman içinde)')
                     st.line_chart(speed_df.set_index('Zaman (s)'))
+                    if num_3d and num_2d:
+                        st.caption('Grafikteki değerlerin %{}\'i 3B kalibre, kalanı 2B tahmin '
+                                   'yöntemiyle hesaplandı.'.format(pct_3d))
 
             st.video(r['output_path'])
 
