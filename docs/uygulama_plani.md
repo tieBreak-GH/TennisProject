@@ -206,7 +206,9 @@ is_reliable_fit = (N >= 5) and (rmse_px <= 8px) and (speed_std_kmh / speed_kmh <
 
 ---
 
-## Faz 4 — Entegrasyon (dispatcher, fallback, arayüz)
+## Faz 4 — Entegrasyon (dispatcher, fallback, arayüz) — ✅ UYGULANDI
+
+`speed_estimator.get_ball_speed_3d` + `estimate_ball_speed` (dispatcher), `main.process_video` bağlaması, `app.py` yöntem rozeti/güven göstergesi ve `tests/test_speed_estimator_3d.py` (11 test, killer test dahil) uygulandı ve tüm test paketi (65 test) yeşil. Ayrıntılar aşağıdaki alt bölümlerde korunmuştur (tasarım referansı olarak).
 
 Amaç: 3B yolu pipeline'a bağlamak; kalibrasyon/fit başarısızsa mevcut 2B yönteme sorunsuz düşmek; kullanıcıya yöntem + güveni göstermek.
 
@@ -244,17 +246,25 @@ ball_speed, speed_method = estimate_ball_speed(
 
 ## Faz 5 — Uçtan uca doğrulama
 
-### 5.1 Gerçek maç videosu
-Saha net görünen bir maç klibiyle uçtan uca çalıştır; 3B'nin devreye girdiğini, hızların fiziksel olarak makul olduğunu (amatör ~60–120, pro servis ~150–220 km/h), çıktı videosu + minimap + ral(l)i tablosunun tutarlı olduğunu doğrula. Regresyon: 2B fallback yolu (saha olmayan mevcut test videosu) bit-bit değişmemiş olmalı.
+### 5.2 Kamera-yüksekliği değişmezlik testi — ✅ UYGULANDI (dispatcher seviyesinde)
 
-### 5.2 Kamera-yüksekliği değişmezlik testi (bu projenin "killer" testi)
-Faz 0.2 sentetik altyapısıyla: **tek bir bilinen parabol**, kameralar 2 m / 5 m / 12 m yüksekliklerde. Beklenen sonuç:
-- **Eski 2B yöntem:** üç yükseklikte üç farklı (ve yanlış) hız — §3.3 tablosunu ampirik doğrular.
-- **Yeni 3B yöntem:** üç yükseklikte de **aynı** doğru hız (±%3).
+`tests/test_speed_estimator_3d.py::test_dispatcher_3d_speed_is_invariant_to_camera_height` (200/500/1200 cm, parametrize) ve
+`test_legacy_2d_method_diverges_across_camera_heights_that_dispatcher_does_not` gerçek `estimate_ball_speed` dispatcher'ı üzerinden çalışıyor (izole `trajectory_3d` testinin ötesinde). Ölçülen: aynı atış için eski 2B yöntem 200cm'de kendi >300km/h aykırı-değer korumasıyla tamamen elenirken, 500cm'de 203 km/h, 1200cm'de 115 km/h veriyor (gerçek ~81 km/h); yeni dispatcher'ın 3B sonucu üç yükseklikte de ~81 km/h'de kalıyor (<%3 varyans). Bu, orijinal "farklı kamera yüksekliğinde doğru top hızı" sorusuna doğrudan, regresyona karşı korumalı bir yanıttır (sentetik veriyle).
 
-Bu test, kullanıcının "farklı kamera yüksekliğinde doğru hız" talebinin karşılandığının doğrudan kanıtıdır ve regresyona karşı kalıcı bir güvence olur.
+### 5.1 Gerçek maç videosu — ✅ UYGULANDI — **kritik bulgu: gerçek yayın kamerasında 3B yöntem devreye giremiyor**
 
-**Kabul kriteri:** 5.2'de 3B hızlar yükseklikten bağımsız (varyans < %3); 5.1'de gerçek video makul ve çökmesiz.
+Kullanıcının sağladığı gerçek klip (Federer–Nadal, Avustralya Açık 2017, 5. set, 1138 kare, 1280x720, ~45s, saha net görünüyor) ile `main.process_video` uçtan uca çalıştırıldı (CPU, ~11 dakika). Video çökmeden tamamlandı, çıktı videosu (top izi, hız etiketi, minimap, sabit HUD, ral(l)i tablosu) doğru render edildi.
+
+**Ancak ilk çalıştırmada `max_speed_kmh=930 km/h`, `avg_speed_kmh=142 km/h` çıktı** — fiziksel olarak imkânsız. Kök neden analizi (`analyze_cache.pkl` üzerinden, modelleri tekrar çalıştırmadan):
+- Bu video, klasik **uzun odaklı (f≈2506px), sahanın arkasından, yükseltilmiş (~9.3 m) yayın kamerası** açısını kullanıyor — yani tam olarak Faz 3.4'ün uyardığı **radyal hareket** durumu: sahayı boyluca kat eden bir ralinin neredeyse tüm vuruşları kameranın bakış eksenine yakın hareket ediyor.
+- **19 sekme-arası segmentin TAMAMI** fiziksel olarak imkânsız bir 3B çözüme yakınsadı (300 km/h ile 3×10⁸ km/h arası; `p0`'ın ima ettiği konum bazen sahadan **kilometrelerce** uzakta/altında).
+- Bunlardan **3 tanesi** `is_reliable_fit`'in kovaryans-tabanlı eşiğini geçti (`speed_std_kmh/speed` oranı ~%0.04 gibi yanıltıcı derecede düşüktü) — yani mevcut güvenilirlik testi bu durumu **yakalayamadı**. Sebep: kovaryans tahmini yalnızca scipy'nin LM çözücüsünün yakınsadığı yerel optimumun civarındaki eğriliği yansıtıyor; problem küresel olarak kötü-koşullandırılmış (birbirinden çok farklı ama benzer reprojeksiyon hatası veren çözümler var) olduğunda bunu göremiyor.
+
+**Uygulanan düzeltme:** `trajectory_3d.is_reliable_fit`'e sabit bir fiziksel olabilirlik tavanı eklendi (`max_speed_kmh=300.0`, varsayılan) — kovaryans oranı ne kadar "güvenli" görünürse görünsün, 300 km/h üstü hiçbir gerçek tenis vuruşu yok. Bu tek kontrol, gözlemlenen tüm imkânsız sonuçları eledi. Düzeltmeden sonra bu videoda **3B yöntem 0 karede devreye giriyor** (tamamı 2B'ye düşüyor), sonuç: `max_speed_kmh=210 km/h`, `avg_speed_kmh=83 km/h`, `min=0` — fiziksel olarak makul (bkz. `tests/test_trajectory_3d.py::test_is_reliable_fit_rejects_physically_impossible_speed_despite_tiny_uncertainty`, gerçek videodan alınan bu fit ile regresyon testi olarak eklendi).
+
+**Önemli, dürüst sonuç:** 3B yöntem kendini imkânsız çıktı üretmekten korumayı başardı (güvenli davranış), ama **bu spesifik kamera açısı için orijinal sorunu (yükseklikten bağımsız hız) çözemedi** — sistem bu videoda tamamen eski 2B yönteme düşüyor ve o yöntemin yükseklik-bağımlı hatası bu görüntüde düzeltilmeden kalıyor. 3B yöntemin pratik faydası, kameranın topun hareketine göre daha fazla paralaks gördüğü açılarda (yandan/köşeden, daha alçak/yakın geniş-açı) daha yüksek; sahanın tam arkasından uzun odaklı klasik yayın açısı - en yaygın TV kurulumu - şu anki haliyle neredeyse her zaman 2B'ye düşecektir. Bu, gelecekteki bir iyileştirme için açık bir yol haritası bulgusu: tek-karesel ışın+yerçekimi modeli yerine (a) çoklu-vuruş üzerinden fiziksel bir önsel (p0'ın saha sınırları içinde olması gibi) eklemek, veya (b) yalnızca yeterli yanal paralaksı olan sahne/kameralarda 3B'yi devreye sokmak gerekebilir.
+
+**Kabul kriteri (revize):** 5.2'de 3B hızlar yükseklikten bağımsız (varyans < %3, sentetik) — ✅. 5.1'de gerçek video çökmeden tamamlanıyor ve **nihai** hızlar fiziksel olarak makul — ✅ (düzeltmeden sonra); ancak bu spesifik videoda 3B yöntem hiç devreye girmiyor, bu yüzden kamera-yüksekliğinden bağımsızlık faydası bu görüntüde henüz kanıtlanamadı — sadece sentetik testlerde kanıtlandı.
 
 ---
 
