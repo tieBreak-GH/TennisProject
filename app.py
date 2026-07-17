@@ -4,11 +4,22 @@ import json
 import os
 import shutil
 import tempfile
+import threading
+import time
 
 import pandas as pd
 import streamlit as st
 
 from main import process_video
+
+
+class AnalysisCancelled(Exception):
+    """Raised from the progress callback (see _run_batch) to unwind
+    process_video early once the user clicks 'İptal Et' - process_video has
+    no cancellation support of its own, but it already calls back into our
+    code every ~20 frames, which is a convenient, already-existing hook to
+    check a cancellation flag without threading a new parameter through the
+    whole pipeline."""
 
 WEIGHTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'weights')
 BALL_MODEL = os.path.join(WEIGHTS_DIR, 'ball_track_model.pt')
@@ -132,6 +143,8 @@ def format_eta(seconds):
 
 if 'results' not in st.session_state:
     st.session_state.results = []
+if 'processing' not in st.session_state:
+    st.session_state.processing = False
 
 _DEVICE_LABELS = ['Otomatik', 'CPU (garantili)', 'GPU (CUDA/DirectML/ROCm/MPS dene)']
 
@@ -146,6 +159,67 @@ def _device_for_choice(label):
     Only 'CPU' forces a specific device, overriding GPU auto-detection.
     """
     return 'cpu' if label.startswith('CPU') else None
+
+
+def _run_batch(files, device_choice, detect_persons, generate_highlights, highlights_top_n,
+                trim_dead_time, cancel_event, progress_state):
+    """
+    Runs process_video for each file in sequence, on a background thread so
+    the main Streamlit script thread stays free to keep rerunning and show
+    a live 'İptal Et' button (Streamlit reruns the whole script per
+    interaction - a synchronous call here would block that entirely, and a
+    click during it would only be handled once process_video returns).
+
+    Must not call any st.* function - there is no Streamlit script-run
+    context on a background thread. Progress is instead published by
+    mutating progress_state (a plain dict), which the main thread polls and
+    renders; cancel_event is checked from on_progress (process_video's own
+    progress callback, invoked every ~20 frames) to unwind early via
+    AnalysisCancelled - process_video has no cancellation support of its
+    own, but this hook already exists and fires often enough to be
+    responsive.
+    """
+    results = []
+    total = len(files)
+    for idx, (name, data) in enumerate(files, start=1):
+        if cancel_event.is_set():
+            break
+        progress_state['current'] = idx
+        progress_state['current_name'] = name
+        work_dir = tempfile.mkdtemp(prefix=_TEMP_DIR_PREFIX)
+        input_path = os.path.join(work_dir, name)
+        with open(input_path, 'wb') as f:
+            f.write(data)
+        output_path = os.path.join(work_dir, 'output.mp4')
+
+        def on_progress(message, fraction, eta):
+            if cancel_event.is_set():
+                raise AnalysisCancelled()
+            progress_state['fraction'] = fraction
+            progress_state['message'] = message
+            progress_state['eta'] = eta
+
+        try:
+            stats = process_video(BALL_MODEL, COURT_MODEL, BOUNCE_MODEL,
+                                   input_path, output_path,
+                                   device=_device_for_choice(device_choice),
+                                   detect_persons=detect_persons,
+                                   progress_callback=on_progress,
+                                   generate_highlights=generate_highlights,
+                                   highlights_top_n=highlights_top_n,
+                                   trim_dead_time=trim_dead_time)
+            results.append({'name': name, 'work_dir': work_dir, 'output_path': output_path,
+                             'stats': stats, 'error': None})
+        except AnalysisCancelled:
+            _cleanup_work_dir(work_dir)
+            progress_state['cancelled'] = True
+            break
+        except Exception as e:
+            results.append({'name': name, 'work_dir': work_dir, 'output_path': None,
+                             'stats': None, 'error': str(e)})
+
+    progress_state['results'] = results
+    progress_state['done'] = True
 
 
 with st.form('analiz_formu'):
@@ -170,52 +244,52 @@ with st.form('analiz_formu'):
     trim_dead_time = st.checkbox('Ölü zamanı kırp (sadece ral(l)iler)', value=False,
                                   help='Ral(l)i olmayan bölümleri (top değişimi, servis öncesi bekleme vb.) atlayıp '
                                        'sadece oyun anlarını içeren tek bir video oluşturur.')
-    submitted = st.form_submit_button('Analiz Et', type='primary')
+    submitted = st.form_submit_button('Analiz Et', type='primary', disabled=st.session_state.processing)
 
-if submitted and uploaded_files:
-    # the previous batch's results are about to be replaced below, so their
-    # temp dirs (input/output video, highlights, ...) are no longer reachable
-    # from the UI - safe to free the disk space now
+if submitted and uploaded_files and not st.session_state.processing:
+    # the previous batch's results are about to be replaced once this one
+    # finishes, so their temp dirs (input/output video, highlights, ...) are
+    # no longer reachable from the UI - safe to free the disk space now
     for prev in st.session_state.results:
         _cleanup_work_dir(prev.get('work_dir'))
+    st.session_state.results = []
 
-    overall_status = st.empty()
-    progress_bar = st.empty()
-    eta_caption = st.empty()
+    files_data = [(f.name, f.getbuffer().tobytes()) for f in uploaded_files]
+    st.session_state.cancel_event = threading.Event()
+    st.session_state.progress_state = {
+        'fraction': 0.0, 'message': '', 'eta': None, 'current': 0, 'current_name': '',
+        'total': len(files_data), 'done': False, 'cancelled': False, 'results': None,
+    }
+    st.session_state.processing = True
+    thread = threading.Thread(
+        target=_run_batch,
+        args=(files_data, device_label, detect_persons, generate_highlights, highlights_top_n,
+              trim_dead_time, st.session_state.cancel_event, st.session_state.progress_state),
+        daemon=True)
+    thread.start()
+    st.rerun()
 
-    results = []
-    total = len(uploaded_files)
-    for idx, uploaded_file in enumerate(uploaded_files, start=1):
-        overall_status.info('Video {}/{}: {}'.format(idx, total, uploaded_file.name))
-        work_dir = tempfile.mkdtemp(prefix=_TEMP_DIR_PREFIX)
-        input_path = os.path.join(work_dir, uploaded_file.name)
-        with open(input_path, 'wb') as f:
-            f.write(uploaded_file.getbuffer())
-        output_path = os.path.join(work_dir, 'output.mp4')
+if st.session_state.processing:
+    progress_state = st.session_state.progress_state
+    st.info('Video {}/{}: {}'.format(progress_state['current'], progress_state['total'],
+                                      progress_state['current_name']))
+    st.progress(progress_state['fraction'], text=progress_state['message'])
+    if progress_state['eta'] is not None:
+        st.caption('Tahmini kalan süre: ~' + format_eta(progress_state['eta']))
 
-        def on_progress(message, fraction, eta):
-            progress_bar.progress(fraction, text=message)
-            eta_caption.caption('Tahmini kalan süre: ~' + format_eta(eta) if eta is not None else '')
-
-        try:
-            stats = process_video(BALL_MODEL, COURT_MODEL, BOUNCE_MODEL,
-                                   input_path, output_path,
-                                   device=_device_for_choice(device_label),
-                                   detect_persons=detect_persons,
-                                   progress_callback=on_progress,
-                                   generate_highlights=generate_highlights,
-                                   highlights_top_n=highlights_top_n,
-                                   trim_dead_time=trim_dead_time)
-            results.append({'name': uploaded_file.name, 'work_dir': work_dir, 'output_path': output_path,
-                             'stats': stats, 'error': None})
-        except Exception as e:
-            results.append({'name': uploaded_file.name, 'work_dir': work_dir, 'output_path': None,
-                             'stats': None, 'error': str(e)})
-
-    overall_status.empty()
-    progress_bar.empty()
-    eta_caption.empty()
-    st.session_state.results = results
+    if progress_state['done']:
+        st.session_state.processing = False
+        st.session_state.results = progress_state['results']
+        if progress_state['cancelled']:
+            st.warning('Analiz iptal edildi. O ana kadar tamamlanan videoların sonuçları aşağıda listelenir.')
+        st.rerun()
+    else:
+        if st.session_state.cancel_event.is_set():
+            st.info('İptal ediliyor, geçerli video karesinin işlenmesi bitene kadar sürebilir...')
+        elif st.button('İptal Et', type='secondary'):
+            st.session_state.cancel_event.set()
+        time.sleep(0.5)
+        st.rerun()
 
 if st.session_state.results:
     single = len(st.session_state.results) == 1
