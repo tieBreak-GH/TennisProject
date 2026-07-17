@@ -181,18 +181,33 @@ def segment_peak_speed(fit_result, sample_times=None):
     return float(np.max(segment_speed_series(fit_result['v0'], times)))
 
 
-def is_reliable_fit(fit_result, min_frames=5, max_rmse_px=8.0, max_speed_std_ratio=0.15):
+def is_reliable_fit(fit_result, min_frames=5, max_rmse_px=8.0, max_speed_std_ratio=0.15,
+                     max_speed_kmh=300.0):
     """
     Whether a fit is trustworthy enough to use instead of falling back to
     the 2D ground-projection speed estimate.
 
-    The primary gate is relative speed uncertainty (speed_std_kmh / speed) -
-    see fit_segment_trajectory's docstring for why rmse_px and frame count
-    alone can't catch a confidently-wrong fit (near-radial ball motion, or
-    a too-short flight segment, both showed low rmse_px despite large
-    actual speed error in testing; the covariance-based speed_std_kmh
-    tracked actual error well in both cases). min_frames/max_rmse_px are
-    kept as cheap secondary sanity checks.
+    The primary statistical gate is relative speed uncertainty
+    (speed_std_kmh / speed) - see fit_segment_trajectory's docstring for why
+    rmse_px and frame count alone can't catch a confidently-wrong fit
+    (near-radial ball motion, or a too-short flight segment, both showed low
+    rmse_px despite large actual speed error in synthetic testing; the
+    covariance-based speed_std_kmh tracked actual error well in both cases).
+
+    max_speed_kmh is a second, non-statistical gate added after validating
+    against a real broadcast-camera match video (Faz 5.1): with a long-lens,
+    behind-the-baseline camera, essentially every rally shot moves close to
+    the camera's viewing axis, which is exactly the near-radial case where
+    monocular depth/velocity separation is ill-conditioned - and for that
+    real footage, EVERY bounce-to-bounce segment converged to a wildly wrong
+    solution (implied ball positions kilometers from the court, speeds from
+    300 to 3*10^8 km/h), several of which still had a deceptively small
+    speed_std_kmh/speed ratio (the covariance estimate only reflects local
+    curvature around whatever optimum scipy's LM solver landed in - it
+    can't see that the global least-squares landscape had multiple very
+    different, similarly-well-reprojecting solutions). No tennis shot ever
+    recorded exceeds ~270 km/h, so any fit above this ceiling is certainly
+    wrong regardless of what its own uncertainty estimate claims.
     :params
         fit_result: dict from fit_segment_trajectory, or None
         min_frames: below this the system is barely/not over-determined
@@ -202,10 +217,14 @@ def is_reliable_fit(fit_result, min_frames=5, max_rmse_px=8.0, max_speed_std_rat
             path (e.g. a net clip) the model doesn't fit well
         max_speed_std_ratio: reject if the estimated 1-sigma speed
             uncertainty exceeds this fraction of the fitted speed itself
+        max_speed_kmh: hard physical-plausibility ceiling - reject
+            regardless of how confident the fit claims to be
     """
     if fit_result is None or fit_result['n'] < min_frames or fit_result['rmse_px'] > max_rmse_px:
         return False
     speed_kmh = float(np.linalg.norm(fit_result['v0'])) * 0.036
+    if speed_kmh > max_speed_kmh:
+        return False
     if speed_kmh <= 1e-9:
         return fit_result['speed_std_kmh'] <= 1e-6
     return (fit_result['speed_std_kmh'] / speed_kmh) <= max_speed_std_ratio

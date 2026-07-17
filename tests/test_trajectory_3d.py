@@ -108,6 +108,21 @@ def test_is_reliable_fit_flags_low_frame_count_high_rmse_and_high_speed_uncertai
     assert not is_reliable_fit(None)
 
 
+def test_is_reliable_fit_rejects_physically_impossible_speed_despite_tiny_uncertainty():
+    # Discovered on a real broadcast match video (Faz 5.1): a long-lens,
+    # behind-the-baseline camera makes nearly every rally shot near-radial,
+    # which is ill-conditioned enough that scipy's LM solver can converge to
+    # a wildly wrong depth/velocity (implied ball positions kilometers from
+    # the court) that still reprojects well AND has a deceptively tiny local
+    # speed_std_kmh/speed ratio - the covariance estimate only reflects local
+    # curvature around whatever optimum was found, not the global ambiguity.
+    # No real tennis shot exceeds ~270 km/h, so a fit claiming 930 km/h with
+    # 0.04% relative uncertainty must still be rejected.
+    impossible_fit = {'n': 28, 'rmse_px': 2.2, 'v0': np.array([0.0, 0.0, 25833.6]),
+                       'speed_std_kmh': 0.37}
+    assert not is_reliable_fit(impossible_fit)
+
+
 def test_segment_speed_series_matches_analytic_projectile_speed():
     v0 = np.array([0.0, 0.0, 500.0])  # straight up
     times = np.array([0.0, 0.5, 1.0])
